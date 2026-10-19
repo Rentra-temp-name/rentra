@@ -1,0 +1,75 @@
+from functools import lru_cache
+from typing import Optional
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """Application settings loaded from environment variables and .env file.
+    
+    Fails on startup if any required environment variable is missing or empty.
+    Secrets are masked in string representations to prevent accidental leakage.
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=(".env", "apps/api/.env"),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    DATABASE_URL: str = Field(
+        ...,
+        min_length=1,
+        description="Postgres connection string through pooler for rentra_api role",
+    )
+    SUPABASE_URL: str = Field(
+        ...,
+        min_length=1,
+        description="Supabase project URL",
+    )
+    SUPABASE_SERVICE_ROLE_KEY: str = Field(
+        ...,
+        min_length=1,
+        description="Supabase service role key (Storage/Auth admin only, never DB queries)",
+    )
+    FRONTEND_ORIGIN: str = Field(
+        ...,
+        min_length=1,
+        description="Allowed frontend origin for CORS",
+    )
+    TEST_DATABASE_URL: Optional[str] = Field(
+        default=None,
+        description="Local test database URL (pointing at local Postgres, used by tests only)",
+    )
+
+    @field_validator(
+        "DATABASE_URL",
+        "SUPABASE_URL",
+        "SUPABASE_SERVICE_ROLE_KEY",
+        "FRONTEND_ORIGIN",
+    )
+    @classmethod
+    def validate_non_empty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("Environment variable must not be empty")
+        return v.strip()
+
+    def __repr__(self) -> str:
+        return (
+            f"Settings("
+            f"DATABASE_URL='***', "
+            f"SUPABASE_URL={self.SUPABASE_URL!r}, "
+            f"SUPABASE_SERVICE_ROLE_KEY='***', "
+            f"FRONTEND_ORIGIN={self.FRONTEND_ORIGIN!r}, "
+            f"TEST_DATABASE_URL={'***' if self.TEST_DATABASE_URL else None!r}"
+            f")"
+        )
+
+    def __str__(self) -> str:
+        return self.__repr__()
+
+
+@lru_cache
+def get_settings() -> Settings:
+    """Return cached Settings instance, reading from environment."""
+    return Settings()

@@ -122,3 +122,10 @@ def test_health_ready_connects_as_rentra_api_and_executes_select_1():
     response = client.get("/health/ready")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+    settings = get_settings()
+    with psycopg.connect(settings.DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT current_user")
+            assert cur.fetchone()[0] == "rentra_api"
+

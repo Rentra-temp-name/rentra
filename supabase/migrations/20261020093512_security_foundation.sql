@@ -17,9 +17,9 @@ BEGIN
 END
 $$;
 
--- Grant USAGE on schema app only to rentra_api; ensure no CREATE and no ownership
+-- Grant USAGE on schema app only to rentra_api
 GRANT USAGE ON SCHEMA app TO rentra_api;
-REVOKE CREATE ON SCHEMA app FROM rentra_api;
+
 
 -- Alter default privileges in schema app so new tables, sequences, and functions never grant to anon or authenticated
 ALTER DEFAULT PRIVILEGES IN SCHEMA app REVOKE ALL ON TABLES FROM anon, authenticated, PUBLIC;

@@ -4,7 +4,9 @@ from unittest.mock import patch
 from pydantic import ValidationError
 from starlette.testclient import TestClient
 
-from rentra_api.config import Settings
+import psycopg
+
+from rentra_api.config import Settings, get_settings
 from rentra_api.main import app
 
 
@@ -105,6 +107,26 @@ class TestHealthEndpoints(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"status": "ok"})
 
+        settings = get_settings()
+        with psycopg.connect(settings.DATABASE_URL) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT current_user")
+                self.assertEqual(cur.fetchone()[0], "rentra_api")
+
+    def test_ready_fails_when_db_down(self):
+        client = TestClient(app, raise_server_exceptions=False)
+        with patch.dict(
+            os.environ,
+            {"DATABASE_URL": "postgresql://rentra_api:pass@127.0.0.1:54399/postgres?connect_timeout=1"},
+        ):
+            get_settings.cache_clear()
+            try:
+                response = client.get("/health/ready")
+                self.assertNotEqual(response.status_code, 200)
+            finally:
+                get_settings.cache_clear()
+
 
 if __name__ == "__main__":
     unittest.main()
+

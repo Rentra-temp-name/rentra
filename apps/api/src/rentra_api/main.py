@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, status
+import psycopg
 
 from rentra_api.config import get_settings
 
@@ -32,6 +33,25 @@ def health() -> dict[str, str]:
 def health_ready() -> dict[str, str]:
     """Readiness probe.
     
-    Will execute `SELECT 1` as `rentra_api` once database connectivity is configured.
+    Connects as rentra_api via DATABASE_URL and executes `SELECT 1`.
     """
+    settings = get_settings()
+    try:
+        with psycopg.connect(settings.DATABASE_URL) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                row = cur.fetchone()
+                if not row or row[0] != 1:
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail="Database query returned unexpected result",
+                    )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Database connection failed: {exc}",
+        ) from exc
     return {"status": "ok"}
+

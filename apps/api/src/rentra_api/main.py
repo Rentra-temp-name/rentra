@@ -23,6 +23,12 @@ app = FastAPI(
 )
 
 
+def get_db_connection() -> psycopg.Connection:
+    """Return a new database connection configured with DATABASE_URL for rentra_api."""
+    settings = get_settings()
+    return psycopg.connect(settings.DATABASE_URL)
+
+
 @app.get("/health", tags=["health"])
 def health() -> dict[str, str]:
     """Liveness probe."""
@@ -35,9 +41,8 @@ def health_ready() -> dict[str, str]:
     
     Connects as rentra_api via DATABASE_URL and executes `SELECT 1`.
     """
-    settings = get_settings()
     try:
-        with psycopg.connect(settings.DATABASE_URL) as conn:
+        with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT 1")
                 row = cur.fetchone()

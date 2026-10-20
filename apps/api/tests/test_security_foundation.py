@@ -10,7 +10,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from rentra_api.config import get_settings
-from rentra_api.main import app
+from rentra_api.main import app, get_db_connection
 
 
 def test_schema_app_no_usage_for_anon_and_authenticated(db_conn: psycopg.Connection):
@@ -123,9 +123,9 @@ def test_health_ready_connects_as_rentra_api_and_executes_select_1():
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 
-    settings = get_settings()
-    with psycopg.connect(settings.DATABASE_URL) as conn:
+    with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT current_user")
             assert cur.fetchone()[0] == "rentra_api"
+
 

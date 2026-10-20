@@ -1,16 +1,16 @@
+"""Tests for settings validation and health endpoints."""
+
 import os
-import unittest
 from unittest.mock import patch
+import pytest
 from pydantic import ValidationError
 from starlette.testclient import TestClient
 
-import psycopg
-
 from rentra_api.config import Settings, get_settings
-from rentra_api.main import app
+from rentra_api.main import app, get_db_connection
 
 
-class TestSettings(unittest.TestCase):
+class TestSettings:
     def test_settings_succeeds_with_valid_env(self):
         env = {
             "DATABASE_URL": "postgresql://test:test@localhost:5432/postgres",
@@ -21,11 +21,11 @@ class TestSettings(unittest.TestCase):
         }
         with patch.dict(os.environ, env, clear=True):
             s = Settings(_env_file=None)
-            self.assertEqual(s.DATABASE_URL, env["DATABASE_URL"])
-            self.assertEqual(s.SUPABASE_URL, env["SUPABASE_URL"])
-            self.assertEqual(s.SUPABASE_SERVICE_ROLE_KEY, env["SUPABASE_SERVICE_ROLE_KEY"])
-            self.assertEqual(s.FRONTEND_ORIGIN, env["FRONTEND_ORIGIN"])
-            self.assertEqual(s.TEST_DATABASE_URL, env["TEST_DATABASE_URL"])
+            assert s.DATABASE_URL == env["DATABASE_URL"]
+            assert s.SUPABASE_URL == env["SUPABASE_URL"]
+            assert s.SUPABASE_SERVICE_ROLE_KEY == env["SUPABASE_SERVICE_ROLE_KEY"]
+            assert s.FRONTEND_ORIGIN == env["FRONTEND_ORIGIN"]
+            assert s.TEST_DATABASE_URL == env["TEST_DATABASE_URL"]
 
     def test_settings_fails_when_database_url_missing(self):
         env = {
@@ -34,7 +34,7 @@ class TestSettings(unittest.TestCase):
             "FRONTEND_ORIGIN": "http://localhost:3000",
         }
         with patch.dict(os.environ, env, clear=True):
-            with self.assertRaises(ValidationError):
+            with pytest.raises(ValidationError):
                 Settings(_env_file=None)
 
     def test_settings_fails_when_supabase_url_missing(self):
@@ -44,7 +44,7 @@ class TestSettings(unittest.TestCase):
             "FRONTEND_ORIGIN": "http://localhost:3000",
         }
         with patch.dict(os.environ, env, clear=True):
-            with self.assertRaises(ValidationError):
+            with pytest.raises(ValidationError):
                 Settings(_env_file=None)
 
     def test_settings_fails_when_service_role_key_missing(self):
@@ -54,7 +54,7 @@ class TestSettings(unittest.TestCase):
             "FRONTEND_ORIGIN": "http://localhost:3000",
         }
         with patch.dict(os.environ, env, clear=True):
-            with self.assertRaises(ValidationError):
+            with pytest.raises(ValidationError):
                 Settings(_env_file=None)
 
     def test_settings_fails_when_frontend_origin_missing(self):
@@ -64,7 +64,7 @@ class TestSettings(unittest.TestCase):
             "SUPABASE_SERVICE_ROLE_KEY": "test-service-key",
         }
         with patch.dict(os.environ, env, clear=True):
-            with self.assertRaises(ValidationError):
+            with pytest.raises(ValidationError):
                 Settings(_env_file=None)
 
     def test_settings_fails_when_value_is_empty_or_whitespace(self):
@@ -75,7 +75,7 @@ class TestSettings(unittest.TestCase):
             "FRONTEND_ORIGIN": "http://localhost:3000",
         }
         with patch.dict(os.environ, env, clear=True):
-            with self.assertRaises(ValidationError):
+            with pytest.raises(ValidationError):
                 Settings(_env_file=None)
 
     def test_secrets_masked_in_repr(self):
@@ -88,30 +88,30 @@ class TestSettings(unittest.TestCase):
         with patch.dict(os.environ, env, clear=True):
             s = Settings(_env_file=None)
             repr_str = repr(s)
-            self.assertNotIn("secret_pass", repr_str)
-            self.assertNotIn("super_secret_service_key", repr_str)
-            self.assertIn("***", repr_str)
+            assert "secret_pass" not in repr_str
+            assert "super_secret_service_key" not in repr_str
+            assert "***" in repr_str
 
 
-class TestHealthEndpoints(unittest.TestCase):
-    def setUp(self):
+class TestHealthEndpoints:
+    @pytest.fixture(autouse=True)
+    def setup_client(self):
         self.client = TestClient(app)
 
     def test_health_liveness(self):
         response = self.client.get("/health")
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"status": "ok"})
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok"}
 
     def test_health_readiness(self):
         response = self.client.get("/health/ready")
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"status": "ok"})
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok"}
 
-        settings = get_settings()
-        with psycopg.connect(settings.DATABASE_URL) as conn:
+        with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT current_user")
-                self.assertEqual(cur.fetchone()[0], "rentra_api")
+                assert cur.fetchone()[0] == "rentra_api"
 
     def test_ready_fails_when_db_down(self):
         client = TestClient(app, raise_server_exceptions=False)
@@ -122,11 +122,6 @@ class TestHealthEndpoints(unittest.TestCase):
             get_settings.cache_clear()
             try:
                 response = client.get("/health/ready")
-                self.assertNotEqual(response.status_code, 200)
+                assert response.status_code != 200
             finally:
                 get_settings.cache_clear()
-
-
-if __name__ == "__main__":
-    unittest.main()
-

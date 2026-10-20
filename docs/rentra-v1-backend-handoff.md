@@ -174,8 +174,8 @@ Boosted listings, reports on profiles, push notifications, Idempotency-Key table
 
 1. `rentra_api` role, schema `app`, default privileges, RLS baseline, test harness on local Supabase.
 2. `profiles`, JWT verification, auth middleware, the deletion-requested check.
-3. Tenant current and search locations, registry from section 16 (search area format is open, see section 15).
-4. Listings, lifecycle triggers, photos, version handling, numeric fields.
+3. Tenant current and search locations, registry from section 16 (search area format is open, see section 15). Add a regression test proving `anon` and `authenticated` cannot execute `app.get_public_profile(uuid)`.
+4. Listings, lifecycle triggers, photos, version handling, numeric fields. Tighten `app.get_public_profile(p_id)` to return contact details only when that profile owns a publicly visible listing (`status = 'active' AND suspended_at IS NULL`), and test that profiles without one are excluded.
 5. Public reads, map with clustering, rate limits.
 6. Requirements and matching (perfect, strong, conflicts tiers).
 7. Connect, notifications sidebar.

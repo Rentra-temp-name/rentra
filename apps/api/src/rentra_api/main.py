@@ -209,12 +209,8 @@ def read_public_profile(profile_id: UUID) -> dict[str, Any]:
     """Expose the explicitly public contact fields for visitor profile/listing views."""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            # This endpoint intentionally publishes only display_name and WhatsApp.
-            # Setting the target as the RLS identity still keeps the query owner-scoped.
-            cur.execute("SELECT set_config('app.user_id', %s, true)", (str(profile_id),))
             cur.execute(
-                """SELECT display_name, whatsapp FROM app.profiles
-                   WHERE id = %s AND deletion_requested_at IS NULL""",
+                "SELECT display_name, whatsapp FROM app.get_public_profile(%s)",
                 (str(profile_id),),
             )
             row = cur.fetchone()

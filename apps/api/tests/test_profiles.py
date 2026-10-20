@@ -1,13 +1,14 @@
 """Integration coverage for profiles using local Auth and PostgreSQL services."""
 
-import uuid
 import json
+import uuid
 from datetime import datetime, timezone
 
 import httpx
 import jwt
 import psycopg
 import pytest
+from cryptography.hazmat.primitives.asymmetric import ec
 from starlette.testclient import TestClient
 
 from rentra_api.config import get_settings
@@ -107,6 +108,25 @@ def test_rejects_invalid_real_token_variants(signed_in_user, tamper):
     assert response.status_code == 401
 
 
+def test_rejects_correct_claims_signed_with_different_key(signed_in_user):
+    auth_token = signed_in_user["token"]
+    auth_header = jwt.get_unverified_header(auth_token)
+    claims = jwt.decode(auth_token, options={"verify_signature": False})
+    other_private_key = ec.generate_private_key(ec.SECP256R1())
+    wrong_signature_token = jwt.encode(
+        claims,
+        other_private_key,
+        algorithm="ES256",
+        headers={"kid": auth_header["kid"]},
+    )
+
+    assert jwt.get_unverified_header(wrong_signature_token)["kid"] == auth_header["kid"]
+    assert jwt.decode(wrong_signature_token, options={"verify_signature": False}) == claims
+    with TestClient(app) as client:
+        response = client.get("/me", headers=auth_headers(wrong_signature_token))
+    assert response.status_code == 401
+
+
 def test_missing_token_is_rejected():
     with TestClient(app) as client:
         response = client.get("/me")
@@ -138,7 +158,7 @@ def test_update_normalizes_phone_and_rejects_invalid_or_unknown_fields(signed_in
     assert unknown.status_code == 422
 
 
-def test_visitors_can_see_public_profile_contact_fields(signed_in_user):
+def test_public_profile_only_shows_contact_fields_and_hides_deleted_or_unknown(signed_in_user, test_database_url):
     with TestClient(app) as client:
         changed = client.put("/me", headers=signed_in_user["headers"],
                              json={"display_name": "Public landlord", "whatsapp": "9812345678"})
@@ -148,6 +168,17 @@ def test_visitors_can_see_public_profile_contact_fields(signed_in_user):
     assert set(public.json()) == {"display_name", "whatsapp"}
     assert public.json()["display_name"] == "Public landlord"
     assert public.json()["whatsapp"] == "+9779812345678"
+
+    with psycopg.connect(test_database_url) as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE app.profiles SET deletion_requested_at = now() WHERE id = %s",
+            (signed_in_user["id"],),
+        )
+    with TestClient(app) as client:
+        deleted = client.get(f"/profiles/{signed_in_user['id']}")
+        unknown = client.get(f"/profiles/{uuid.uuid4()}")
+    assert deleted.status_code == 404
+    assert unknown.status_code == 404
 
 
 def test_rls_blocks_cross_user_select_and_update_and_unset_user(signed_in_pair, test_database_url):
@@ -209,3 +240,13 @@ def test_profile_grants_and_rls(db_conn: psycopg.Connection):
             for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE"):
                 cur.execute("SELECT has_table_privilege(%s, 'app.profiles', %s)", (role, privilege))
                 assert cur.fetchone()[0] is False
+        cur.execute(
+            "SELECT has_function_privilege('rentra_api', 'app.get_public_profile(uuid)', 'EXECUTE')"
+        )
+        assert cur.fetchone()[0] is True
+        for role in ("anon", "authenticated"):
+            cur.execute(
+                "SELECT has_function_privilege(%s, 'app.get_public_profile(uuid)', 'EXECUTE')",
+                (role,),
+            )
+            assert cur.fetchone()[0] is False

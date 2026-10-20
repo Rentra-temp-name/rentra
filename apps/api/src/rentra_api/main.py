@@ -213,11 +213,11 @@ def read_public_profile(profile_id: UUID) -> dict[str, Any]:
             # Setting the target as the RLS identity still keeps the query owner-scoped.
             cur.execute("SELECT set_config('app.user_id', %s, true)", (str(profile_id),))
             cur.execute(
-                """SELECT id, display_name, whatsapp, created_at FROM app.profiles
+                """SELECT display_name, whatsapp FROM app.profiles
                    WHERE id = %s AND deletion_requested_at IS NULL""",
                 (str(profile_id),),
             )
             row = cur.fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="Profile not found")
-    return profile_json(dict(zip(("id", "display_name", "whatsapp", "created_at"), row)))
+    return {"display_name": row[0], "whatsapp": row[1]}

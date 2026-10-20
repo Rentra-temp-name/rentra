@@ -145,6 +145,7 @@ def test_visitors_can_see_public_profile_contact_fields(signed_in_user):
         public = client.get(f"/profiles/{signed_in_user['id']}")
     assert changed.status_code == 200
     assert public.status_code == 200
+    assert set(public.json()) == {"display_name", "whatsapp"}
     assert public.json()["display_name"] == "Public landlord"
     assert public.json()["whatsapp"] == "+9779812345678"
 

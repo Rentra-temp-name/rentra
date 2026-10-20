@@ -1,7 +1,10 @@
 """Pytest fixtures for rentra_api tests."""
 
 import os
+import uuid
 from collections.abc import Generator
+
+import httpx
 import pytest
 import psycopg
 
@@ -26,6 +29,78 @@ def get_test_database_url() -> str:
 def test_database_url() -> str:
     """Session fixture providing the configured TEST_DATABASE_URL."""
     return get_test_database_url()
+
+
+@pytest.fixture
+def signed_in_user():
+    """Create and sign in a real user through local Supabase Auth."""
+    settings = get_settings()
+    email = f"rentra-{uuid.uuid4()}@example.test"
+    password = f"T!{uuid.uuid4()}"
+    admin_headers = {
+        "apikey": settings.SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {settings.SUPABASE_SERVICE_ROLE_KEY}",
+    }
+    with httpx.Client(base_url=settings.SUPABASE_URL.rstrip("/"), timeout=15) as auth:
+        created = auth.post(
+            "/auth/v1/admin/users",
+            headers=admin_headers,
+            json={"email": email, "password": password, "email_confirm": True},
+        )
+        assert created.status_code in (200, 201), created.text
+        user_id = created.json()["id"]
+        signed_in = auth.post(
+            "/auth/v1/token?grant_type=password",
+            headers={"apikey": settings.SUPABASE_SERVICE_ROLE_KEY},
+            json={"email": email, "password": password},
+        )
+        assert signed_in.status_code == 200, signed_in.text
+    token = signed_in.json()["access_token"]
+    yield {
+        "id": user_id,
+        "token": token,
+        "email": email,
+        "headers": {"Authorization": f"Bearer {token}", "apikey": settings.SUPABASE_SERVICE_ROLE_KEY},
+    }
+    with httpx.Client(base_url=settings.SUPABASE_URL.rstrip("/"), timeout=15) as auth:
+        deleted = auth.delete(f"/auth/v1/admin/users/{user_id}", headers=admin_headers)
+        assert deleted.status_code in (200, 204), deleted.text
+
+
+@pytest.fixture
+def signed_in_pair(signed_in_user):
+    """Create two separate real Auth users for cross-owner integration tests."""
+    settings = get_settings()
+    email = f"rentra-{uuid.uuid4()}@example.test"
+    password = f"T!{uuid.uuid4()}"
+    admin_headers = {
+        "apikey": settings.SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {settings.SUPABASE_SERVICE_ROLE_KEY}",
+    }
+    with httpx.Client(base_url=settings.SUPABASE_URL.rstrip("/"), timeout=15) as auth:
+        created = auth.post(
+            "/auth/v1/admin/users",
+            headers=admin_headers,
+            json={"email": email, "password": password, "email_confirm": True},
+        )
+        assert created.status_code in (200, 201), created.text
+        user_id = created.json()["id"]
+        signed_in = auth.post(
+            "/auth/v1/token?grant_type=password",
+            headers={"apikey": settings.SUPABASE_SERVICE_ROLE_KEY},
+            json={"email": email, "password": password},
+        )
+        assert signed_in.status_code == 200, signed_in.text
+    token = signed_in.json()["access_token"]
+    user_b = {
+        "id": user_id,
+        "token": token,
+        "headers": {"Authorization": f"Bearer {token}", "apikey": settings.SUPABASE_SERVICE_ROLE_KEY},
+    }
+    yield signed_in_user, user_b
+    with httpx.Client(base_url=settings.SUPABASE_URL.rstrip("/"), timeout=15) as auth:
+        deleted = auth.delete(f"/auth/v1/admin/users/{user_id}", headers=admin_headers)
+        assert deleted.status_code in (200, 204), deleted.text
 
 
 @pytest.fixture(scope="function")

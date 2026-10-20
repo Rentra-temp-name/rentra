@@ -1,0 +1,126 @@
+CREATE TABLE app.attribute_options (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    attribute_id uuid NOT NULL REFERENCES app.attributes(id) ON DELETE RESTRICT,
+    label text NOT NULL,
+    sort_order smallint NOT NULL CHECK (sort_order > 0),
+    is_exclusive boolean NOT NULL DEFAULT false,
+    is_active boolean NOT NULL DEFAULT true,
+    UNIQUE (attribute_id, label),
+    UNIQUE (attribute_id, sort_order)
+);
+
+ALTER TABLE app.attribute_options ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY attribute_options_select_registry ON app.attribute_options
+    FOR SELECT TO rentra_api
+    USING (true);
+
+REVOKE ALL ON app.attribute_options FROM PUBLIC, anon, authenticated, rentra_api;
+GRANT SELECT ON app.attribute_options TO rentra_api;
+
+INSERT INTO app.attribute_options (attribute_id, label, sort_order, is_exclusive)
+SELECT attributes.id, seed.label, seed.sort_order, seed.is_exclusive
+FROM (VALUES
+    ('tenant_type', 'bachelors', 1, false),
+    ('tenant_type', 'family', 2, false),
+    ('tenant_type', 'all_allowed', 3, true),
+    ('pets', 'yes', 1, false),
+    ('pets', 'no', 2, false),
+    ('dietary', 'non_veg_allowed', 1, false),
+    ('dietary', 'pure_veg_only', 2, false),
+    ('parties', 'parties_allowed', 1, false),
+    ('parties', 'small_gatherings_only', 2, false),
+    ('parties', 'quiet_hours', 3, false),
+    ('smoking', 'inside_allowed', 1, false),
+    ('smoking', 'balcony_outdoor_only', 2, false),
+    ('smoking', 'strictly_non_smoking', 3, false),
+    ('alcohol', 'allowed', 1, false),
+    ('alcohol', 'not_allowed', 2, false),
+    ('curfew', 'no_curfew', 1, false),
+    ('curfew', 'strict_curfew', 2, false),
+    ('curfew', 'negotiable_curfew', 3, false),
+    ('visitors', 'anytime', 1, false),
+    ('visitors', 'daytime_only_no_overnight', 2, false),
+    ('visitors', 'family_only_friends_restricted', 3, false),
+    ('wall_decor', 'drilling_painting_allowed', 1, false),
+    ('wall_decor', 'temporary_decor_only', 2, false),
+    ('terrace_access', 'open_rooftop', 1, false),
+    ('terrace_access', 'fixed_hours_drying_only', 2, false),
+    ('religious_events', 'small_pujas_allowed', 1, false),
+    ('religious_events', 'fire_havan_restricted', 2, false),
+    ('floor_level', 'ground', 1, false),
+    ('floor_level', 'first', 2, false),
+    ('floor_level', 'second', 3, false),
+    ('floor_level', 'top', 4, false),
+    ('floor_level', 'penthouse', 5, false),
+    ('furnishing', 'unfurnished', 1, false),
+    ('furnishing', 'semi_furnished', 2, false),
+    ('furnishing', 'fully_furnished', 3, false),
+    ('property_type', 'full_flat', 1, false),
+    ('property_type', 'single_room', 2, false),
+    ('property_type', 'whole_house', 3, false),
+    ('property_type', 'sharing_room_pg', 4, false),
+    ('road_type', 'pitched_blacktop', 1, false),
+    ('road_type', 'gravel', 2, false),
+    ('road_type', 'dirt', 3, false),
+    ('separate_living_room', 'separate_living_room', 1, false),
+    ('separate_living_room', 'combined_living_dining', 2, false),
+    ('separate_living_room', 'none', 3, false),
+    ('bathroom_attachment', 'attached', 1, false),
+    ('bathroom_attachment', 'common', 2, false),
+    ('bathroom_attachment', 'mixed', 3, false),
+    ('pooja_room', 'yes', 1, false),
+    ('pooja_room', 'no', 2, false),
+    ('study_room', 'yes', 1, false),
+    ('study_room', 'no', 2, false),
+    ('private_rooftop_terrace', 'yes', 1, false),
+    ('private_rooftop_terrace', 'no', 2, false),
+    ('yard_garden', 'yes', 1, false),
+    ('yard_garden', 'no', 2, false),
+    ('bike_parking', 'yes', 1, false),
+    ('bike_parking', 'no', 2, false),
+    ('car_parking', 'yes', 1, false),
+    ('car_parking', 'no', 2, false),
+    ('ev_charging', 'yes', 1, false),
+    ('ev_charging', 'no', 2, false),
+    ('water_supply', '24x7_supply', 1, false),
+    ('water_supply', 'tanker', 2, false),
+    ('water_supply', 'boring', 3, false),
+    ('water_supply', 'underground_reserve_tank', 4, false),
+    ('hot_water', 'solar_heater', 1, false),
+    ('hot_water', 'electric_geyser', 2, false),
+    ('hot_water', 'gas_geyser', 3, false),
+    ('backup_power', 'inverter', 1, false),
+    ('backup_power', 'solar', 2, false),
+    ('backup_power', 'generator', 3, false),
+    ('internet_fiber', 'yes', 1, false),
+    ('internet_fiber', 'no', 2, false),
+    ('cooling', 'ac_installed', 1, false),
+    ('cooling', 'ceiling_fans', 2, false),
+    ('laundry', 'washing_machine', 1, false),
+    ('laundry', 'dedicated_space', 2, false),
+    ('laundry', 'open_drying', 3, false),
+    ('kitchen_appliances', 'refrigerator', 1, false),
+    ('kitchen_appliances', 'chimney_exhaust_fan', 2, false),
+    ('elevator', 'yes', 1, false),
+    ('elevator', 'no', 2, false),
+    ('security', 'gate_guard', 1, false),
+    ('security', 'cctv', 2, false),
+    ('security', 'gated_compound', 3, false),
+    ('extras', 'garden', 1, false),
+    ('extras', 'kids_play_area', 2, false),
+    ('extras', 'door_to_door_trash_pickup', 3, false)
+) AS seed(attribute_key, label, sort_order, is_exclusive)
+JOIN app.attributes AS attributes ON attributes.key = seed.attribute_key
+ORDER BY array_position(
+    ARRAY[
+        'tenant_type', 'pets', 'dietary', 'parties', 'smoking', 'alcohol', 'curfew',
+        'visitors', 'wall_decor', 'terrace_access', 'religious_events', 'floor_level',
+        'furnishing', 'property_type', 'road_type', 'separate_living_room',
+        'bathroom_attachment', 'pooja_room', 'study_room', 'private_rooftop_terrace',
+        'yard_garden', 'bike_parking', 'car_parking', 'ev_charging', 'water_supply',
+        'hot_water', 'backup_power', 'internet_fiber', 'cooling', 'laundry',
+        'kitchen_appliances', 'elevator', 'security', 'extras'
+    ]::text[],
+    seed.attribute_key
+), seed.sort_order;

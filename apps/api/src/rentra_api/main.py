@@ -7,9 +7,10 @@ from uuid import UUID
 import jwt
 import psycopg
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from jwt import PyJWKClient
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from rentra_api.config import get_settings
 
@@ -36,6 +37,20 @@ async def account_deletion_requested_handler(
         status_code=status.HTTP_403_FORBIDDEN,
         content={"code": "account_deletion_requested", "message": "This account is pending deletion"},
     )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    """Return validation errors without echoing request values such as exact coordinates."""
+    safe_errors = [
+        {
+            "loc": error.get("loc", ()),
+            "msg": error.get("msg", "Invalid value"),
+            "type": error.get("type", "value_error"),
+        }
+        for error in exc.errors()
+    ]
+    return JSONResponse(status_code=422, content={"detail": safe_errors})
 
 
 def get_db_connection() -> psycopg.Connection:
@@ -217,3 +232,169 @@ def read_public_profile(profile_id: UUID) -> dict[str, Any]:
     if row is None:
         raise HTTPException(status_code=404, detail="Profile not found")
     return {"display_name": row[0], "whatsapp": row[1]}
+
+
+@app.get("/registry")
+def read_registry() -> dict[str, Any]:
+    """Return the active, read-only attribute and numeric-field registries."""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT a.id, a.key, a.type, a.pick_rule, a.is_active,
+                          a.required_at_publish, o.id, o.label, o.sort_order,
+                          o.is_exclusive, o.is_active
+                   FROM app.attributes AS a
+                   LEFT JOIN app.attribute_options AS o
+                     ON o.attribute_id = a.id AND o.is_active
+                   WHERE a.is_active
+                   ORDER BY a.key, o.sort_order"""
+            )
+            rows = cur.fetchall()
+            cur.execute(
+                "SELECT key, unit, is_active FROM app.numeric_fields WHERE is_active ORDER BY key"
+            )
+            numeric_rows = cur.fetchall()
+
+    attributes: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        attribute_id, key, kind, pick_rule, active, required, option_id, label, order, exclusive, option_active = row
+        attribute = attributes.setdefault(
+            key,
+            {
+                "id": str(attribute_id),
+                "key": key,
+                "type": kind,
+                "pick_rule": pick_rule,
+                "is_active": active,
+                "required_at_publish": required,
+                "options": [],
+            },
+        )
+        if option_id is not None:
+            attribute["options"].append(
+                {
+                    "id": str(option_id),
+                    "label": label,
+                    "sort_order": order,
+                    "is_exclusive": exclusive,
+                    "is_active": option_active,
+                }
+            )
+    return {
+        "attributes": list(attributes.values()),
+        "numeric_fields": [
+            {"key": key, "unit": unit, "is_active": active}
+            for key, unit, active in numeric_rows
+        ],
+    }
+
+
+class LocationPointInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    latitude: float
+    longitude: float
+
+    @field_validator("latitude", "longitude")
+    @classmethod
+    def round_to_grid(cls, value: float) -> float:
+        return round(value, 2)
+
+    @model_validator(mode="after")
+    def validate_nepal_bounds(self) -> "LocationPointInput":
+        if not (26.3 <= self.latitude <= 30.5 and 80.0 <= self.longitude <= 88.3):
+            raise ValueError("point must be inside the supported Nepal bounding box")
+        return self
+
+
+class TenantLocationsUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    current_point: LocationPointInput
+    search_point: LocationPointInput
+    search_radius_km: float = Field(default=5, ge=1, le=50)
+
+
+def _location_response(row: tuple[Any, ...] | None) -> dict[str, Any]:
+    if row is None:
+        return {"current_point": None, "search_point": None, "search_radius_km": 5.0}
+    current_lat, current_lon, search_lat, search_lon, radius, created_at, updated_at = row
+    return {
+        "current_point": {"latitude": float(current_lat), "longitude": float(current_lon)},
+        "search_point": {"latitude": float(search_lat), "longitude": float(search_lon)},
+        "search_radius_km": float(radius),
+        "created_at": created_at.isoformat(),
+        "updated_at": updated_at.isoformat(),
+    }
+
+
+@app.get("/me/locations")
+def read_my_locations(
+    profile: Annotated[dict[str, Any], Depends(get_current_profile)],
+) -> dict[str, Any]:
+    uid = str(profile["id"])
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT set_config('app.user_id', %s, true)", (uid,))
+            cur.execute(
+                """SELECT extensions.st_y(current_point::extensions.geometry),
+                          extensions.st_x(current_point::extensions.geometry),
+                          extensions.st_y(search_point::extensions.geometry),
+                          extensions.st_x(search_point::extensions.geometry),
+                          search_radius_km, created_at, updated_at
+                   FROM app.tenant_locations WHERE user_id = %s""",
+                (uid,),
+            )
+            row = cur.fetchone()
+    return _location_response(row)
+
+
+@app.put("/me/locations")
+def update_my_locations(
+    update: TenantLocationsUpdate,
+    profile: Annotated[dict[str, Any], Depends(get_current_profile)],
+) -> dict[str, Any]:
+    uid = str(profile["id"])
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT set_config('app.user_id', %s, true)", (uid,))
+                cur.execute(
+                    """INSERT INTO app.tenant_locations AS locations
+                           (user_id, current_point, search_point, search_radius_km)
+                       VALUES (
+                           %s,
+                           extensions.st_setsrid(extensions.st_makepoint(%s, %s), 4326)::extensions.geography,
+                           extensions.st_setsrid(extensions.st_makepoint(%s, %s), 4326)::extensions.geography,
+                           %s
+                       )
+                       ON CONFLICT (user_id) DO UPDATE SET
+                           current_point = EXCLUDED.current_point,
+                           search_point = EXCLUDED.search_point,
+                           search_radius_km = EXCLUDED.search_radius_km,
+                           updated_at = now()
+                       WHERE locations.user_id = %s
+                       RETURNING
+                           extensions.st_y(current_point::extensions.geometry),
+                           extensions.st_x(current_point::extensions.geometry),
+                           extensions.st_y(search_point::extensions.geometry),
+                           extensions.st_x(search_point::extensions.geometry),
+                           search_radius_km, created_at, updated_at""",
+                    (
+                        uid,
+                        update.current_point.longitude,
+                        update.current_point.latitude,
+                        update.search_point.longitude,
+                        update.search_point.latitude,
+                        update.search_radius_km,
+                        uid,
+                    ),
+                )
+                row = cur.fetchone()
+    except psycopg.errors.CheckViolation as exc:
+        raise HTTPException(status_code=422, detail="Invalid location") from exc
+    except psycopg.Error as exc:
+        raise HTTPException(status_code=503, detail="Location storage unavailable") from exc
+    if row is None:
+        raise HTTPException(status_code=404, detail="Locations not found")
+    return _location_response(row)

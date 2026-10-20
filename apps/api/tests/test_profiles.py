@@ -4,7 +4,6 @@ import json
 import uuid
 from datetime import datetime, timezone
 
-import httpx
 import jwt
 import psycopg
 import pytest
@@ -18,63 +17,6 @@ from rentra_api.main import app
 def auth_headers(token: str) -> dict[str, str]:
     settings = get_settings()
     return {"Authorization": f"Bearer {token}", "apikey": settings.SUPABASE_SERVICE_ROLE_KEY}
-
-
-@pytest.fixture
-def signed_in_user():
-    settings = get_settings()
-    email = f"rentra-{uuid.uuid4()}@example.test"
-    password = f"T!{uuid.uuid4()}"
-    headers = {
-        "apikey": settings.SUPABASE_SERVICE_ROLE_KEY,
-        "Authorization": f"Bearer {settings.SUPABASE_SERVICE_ROLE_KEY}",
-    }
-    with httpx.Client(base_url=settings.SUPABASE_URL.rstrip("/"), timeout=15) as auth:
-        created = auth.post(
-            "/auth/v1/admin/users",
-            headers=headers,
-            json={"email": email, "password": password, "email_confirm": True},
-        )
-        assert created.status_code in (200, 201), created.text
-        user_id = created.json()["id"]
-        signed_in = auth.post(
-            "/auth/v1/token?grant_type=password",
-            headers={"apikey": settings.SUPABASE_SERVICE_ROLE_KEY},
-            json={"email": email, "password": password},
-        )
-        assert signed_in.status_code == 200, signed_in.text
-    token = signed_in.json()["access_token"]
-    yield {"id": user_id, "token": token, "email": email, "headers": auth_headers(token)}
-    with httpx.Client(base_url=settings.SUPABASE_URL.rstrip("/"), timeout=15) as auth:
-        deleted = auth.delete(f"/auth/v1/admin/users/{user_id}", headers=headers)
-        assert deleted.status_code in (200, 204), deleted.text
-
-
-@pytest.fixture
-def signed_in_pair(signed_in_user):
-    # The second real Auth account is created through the same local Auth API.
-    settings = get_settings()
-    email = f"rentra-{uuid.uuid4()}@example.test"
-    password = f"T!{uuid.uuid4()}"
-    admin_headers = {
-        "apikey": settings.SUPABASE_SERVICE_ROLE_KEY,
-        "Authorization": f"Bearer {settings.SUPABASE_SERVICE_ROLE_KEY}",
-    }
-    with httpx.Client(base_url=settings.SUPABASE_URL.rstrip("/"), timeout=15) as auth:
-        created = auth.post("/auth/v1/admin/users", headers=admin_headers,
-                            json={"email": email, "password": password, "email_confirm": True})
-        assert created.status_code in (200, 201), created.text
-        user_id = created.json()["id"]
-        signed_in = auth.post("/auth/v1/token?grant_type=password",
-                              headers={"apikey": settings.SUPABASE_SERVICE_ROLE_KEY},
-                              json={"email": email, "password": password})
-        assert signed_in.status_code == 200, signed_in.text
-    user_b = {"id": user_id, "token": signed_in.json()["access_token"],
-              "headers": auth_headers(signed_in.json()["access_token"])}
-    yield signed_in_user, user_b
-    with httpx.Client(base_url=settings.SUPABASE_URL.rstrip("/"), timeout=15) as auth:
-        deleted = auth.delete(f"/auth/v1/admin/users/{user_id}", headers=admin_headers)
-        assert deleted.status_code in (200, 204), deleted.text
 
 
 def test_local_auth_uses_real_supabase_signing_method(signed_in_user):

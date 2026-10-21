@@ -104,6 +104,22 @@ def test_public_profile_only_shows_contact_fields_and_hides_deleted_or_unknown(s
     with TestClient(app) as client:
         changed = client.put("/me", headers=signed_in_user["headers"],
                              json={"display_name": "Public landlord", "whatsapp": "9812345678"})
+    with psycopg.connect(test_database_url) as conn:
+        conn.execute("SELECT set_config('app.user_id', %s, true)", (signed_in_user["id"],))
+        conn.execute("SELECT set_config('app.actor', 'owner', true)")
+        conn.execute(
+            """INSERT INTO app.listings (owner_id, title, rent_amount, point)
+               VALUES (
+                   %s, 'Public profile test listing', 25000,
+                   extensions.st_setsrid(extensions.st_makepoint(85.3249, 27.7172), 4326)::extensions.geography
+               )""",
+            (signed_in_user["id"],),
+        )
+        conn.execute(
+            "UPDATE app.listings SET status = 'active' WHERE owner_id = %s",
+            (signed_in_user["id"],),
+        )
+    with TestClient(app) as client:
         public = client.get(f"/profiles/{signed_in_user['id']}")
     assert changed.status_code == 200
     assert public.status_code == 200

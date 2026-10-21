@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     READ_RATE_WINDOW_SECONDS: int = Field(default=60, ge=1)
     READ_RATE_LIMIT_ANONYMOUS: int = Field(default=60, ge=1)
     READ_RATE_LIMIT_USER: int = Field(default=120, ge=1)
+    WRITE_RATE_LIMIT_USER: int = Field(default=20, ge=1)
     LISTINGS_PAGE_MAX: int = Field(default=50, ge=1, le=50)
     MAP_RESPONSE_CAP: int = Field(default=500, ge=1)
     MAP_CLUSTER_ZOOM: float = Field(default=10.0, ge=0, le=22)

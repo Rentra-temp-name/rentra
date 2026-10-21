@@ -9,6 +9,7 @@ import time
 from typing import Annotated, Any, AsyncGenerator
 from urllib.parse import urljoin
 import re
+from decimal import Decimal
 from uuid import UUID
 
 import jwt
@@ -57,6 +58,7 @@ class InProcessReadLimiter:
 
 
 read_limiter = InProcessReadLimiter()
+write_limiter = InProcessReadLimiter()
 READ_LIMITED_PATHS = {"/health/ready", "/listings", "/areas", "/registry", "/map"}
 
 
@@ -87,10 +89,14 @@ def _request_ip(request: Request) -> str:
 
 @app.middleware("http")
 async def limit_public_reads(request: Request, call_next):
-    if request.method != "GET" or not (
-        request.url.path in READ_LIMITED_PATHS
-        or request.url.path.startswith("/listings/")
-    ):
+    path = request.url.path
+    is_write = request.method in {"POST", "PATCH", "DELETE"} and (
+        path == "/listings" or path.startswith("/listings/")
+    )
+    is_read = request.method == "GET" and (
+        path in READ_LIMITED_PATHS or path.startswith("/listings/")
+    )
+    if not (is_write or is_read):
         return await call_next(request)
 
     settings = get_settings()
@@ -112,11 +118,20 @@ async def limit_public_reads(request: Request, call_next):
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
-    key = ("user", user_id) if user_id else ("ip", _request_ip(request))
-    limit = settings.READ_RATE_LIMIT_USER if user_id else settings.READ_RATE_LIMIT_ANONYMOUS
-    allowed, retry_after = read_limiter.allow(
-        key, limit, settings.READ_RATE_WINDOW_SECONDS
-    )
+    if is_write:
+        # Authenticated dependencies return the usual 401 when no token is supplied.
+        if user_id is None:
+            return await call_next(request)
+        allowed, retry_after = write_limiter.allow(
+            ("user", user_id), settings.WRITE_RATE_LIMIT_USER,
+            settings.READ_RATE_WINDOW_SECONDS,
+        )
+    else:
+        key = ("user", user_id) if user_id else ("ip", _request_ip(request))
+        limit = settings.READ_RATE_LIMIT_USER if user_id else settings.READ_RATE_LIMIT_ANONYMOUS
+        allowed, retry_after = read_limiter.allow(
+            key, limit, settings.READ_RATE_WINDOW_SECONDS
+        )
     if not allowed:
         return JSONResponse(
             status_code=429,
@@ -298,6 +313,86 @@ def profile_json(profile: dict[str, Any]) -> dict[str, Any]:
         "whatsapp": profile["whatsapp"],
         "created_at": profile["created_at"].isoformat(),
     }
+
+
+class ListingPointInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    lat: float
+    lng: float
+
+    @model_validator(mode="after")
+    def within_nepal(self) -> "ListingPointInput":
+        if not (26.3 <= self.lat <= 30.5 and 80.0 <= self.lng <= 88.3):
+            raise ValueError("point must be inside the supported Nepal bounding box")
+        return self
+
+
+class ListingCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    title: str = Field(min_length=1, max_length=500)
+    rent_amount: Decimal = Field(gt=0, max_digits=12, decimal_places=2)
+    point: ListingPointInput
+    size_unit: str | None = None
+
+    @field_validator("title")
+    @classmethod
+    def nonblank_title(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("title must not be blank")
+        return value.strip()
+
+    @field_validator("size_unit")
+    @classmethod
+    def valid_size_unit(cls, value: str | None) -> str | None:
+        if value is not None and value not in {"aana", "ropani", "sq_ft"}:
+            raise ValueError("invalid size unit")
+        return value
+
+
+class ListingPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    version: int = Field(ge=1)
+    title: str | None = Field(default=None, min_length=1, max_length=500)
+    rent_amount: Decimal | None = Field(default=None, gt=0, max_digits=12, decimal_places=2)
+    point: ListingPointInput | None = None
+    size_unit: str | None = None
+    answers: dict[str, list[str] | str] | None = None
+    numeric: dict[str, float] | None = None
+
+    @field_validator("title")
+    @classmethod
+    def nonblank_title(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("title must not be blank")
+        return value.strip() if value is not None else None
+
+    @field_validator("size_unit")
+    @classmethod
+    def valid_size_unit(cls, value: str | None) -> str | None:
+        if value is not None and value not in {"aana", "ropani", "sq_ft"}:
+            raise ValueError("invalid size unit")
+        return value
+
+    @model_validator(mode="after")
+    def has_patch_fields(self) -> "ListingPatch":
+        if not (self.model_fields_set - {"version"}):
+            raise ValueError("at least one editable field is required")
+        return self
+
+
+class ListingStatusInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: str
+
+    @field_validator("status")
+    @classmethod
+    def valid_status(cls, value: str) -> str:
+        if value not in {"draft", "active", "rented", "sold_out", "unavailable", "archived"}:
+            raise ValueError("invalid listing status")
+        return value
 
 
 @app.get("/me")
@@ -586,6 +681,377 @@ PUBLIC_LISTING_SELECT = """SELECT listing.id, listing.title, listing.rent_amount
 FROM app.listings AS listing
 CROSS JOIN LATERAL app.get_public_profile(listing.owner_id) AS public_profile
 WHERE listing.status = 'active' AND listing.suspended_at IS NULL"""
+
+
+def _listing_not_found() -> HTTPException:
+    return HTTPException(
+        status_code=404,
+        detail={"code": "LISTING_NOT_FOUND", "message": "Listing not found"},
+    )
+
+
+def _listing_db_error(exc: psycopg.Error) -> HTTPException:
+    code = getattr(exc.diag, "message_primary", None) or "LISTING_STORAGE_ERROR"
+    if code == "LISTING_NOT_FOUND":
+        return _listing_not_found()
+    conflict_codes = {
+        "LISTING_INVALID_TRANSITION", "LISTING_SUSPENDED", "LISTING_NOT_RESTORABLE",
+        "LISTING_NOT_DRAFT", "LISTING_DELETE_REQUIRES_ARCHIVED", "DRAFT_LIMIT",
+        "VERSION_CONFLICT", "WHATSAPP_REQUIRED",
+    }
+    if code == "LISTING_PUBLISH_INCOMPLETE":
+        missing = [item for item in (getattr(exc.diag, "message_detail", None) or "").split(",") if item]
+        return HTTPException(
+            status_code=422,
+            detail={"code": code, "message": "Listing is missing required publish information", "missing": missing},
+        )
+    if code in conflict_codes:
+        return HTTPException(
+            status_code=409,
+            detail={"code": code, "message": "Listing cannot be changed in its current state"},
+        )
+    if isinstance(exc, (psycopg.errors.CheckViolation, psycopg.errors.ForeignKeyViolation,
+                        psycopg.errors.UniqueViolation, psycopg.errors.InvalidTextRepresentation,
+                        psycopg.errors.NumericValueOutOfRange)):
+        return HTTPException(
+            status_code=422,
+            detail={"code": "INVALID_LISTING_DATA", "message": "Listing data is invalid"},
+        )
+    return HTTPException(
+        status_code=503,
+        detail={"code": "LISTING_STORAGE_UNAVAILABLE", "message": "Listing storage unavailable"},
+    )
+
+
+def _owned_listing_json(conn: psycopg.Connection, owner_id: str, listing_id: str) -> dict[str, Any]:
+    row = conn.execute(
+        """SELECT listing.id, listing.title, listing.rent_amount, listing.size_unit,
+                  extensions.st_y(listing.point::extensions.geometry),
+                  extensions.st_x(listing.point::extensions.geometry), listing.status,
+                  listing.version, listing.created_at, listing.updated_at,
+                  listing.archived_from_status, listing.archived_at,
+                  listing.status_changed_at
+           FROM app.listings AS listing
+           WHERE listing.id = %s AND listing.owner_id = %s""",
+        (listing_id, owner_id),
+    ).fetchone()
+    if row is None:
+        raise _listing_not_found()
+    answers = conn.execute(
+        """SELECT attribute.key, option.label
+           FROM app.listing_answers AS answer
+           JOIN app.attributes AS attribute ON attribute.id = answer.attribute_id
+           JOIN app.attribute_options AS option ON option.id = answer.option_id
+           WHERE answer.listing_id = %s AND EXISTS (
+               SELECT 1 FROM app.listings AS listing
+               WHERE listing.id = answer.listing_id AND listing.owner_id = %s
+           )
+           ORDER BY attribute.key, option.sort_order""",
+        (listing_id, owner_id),
+    ).fetchall()
+    numeric = conn.execute(
+        """SELECT numeric_value.field, numeric_value.value
+           FROM app.listing_numeric AS numeric_value
+           WHERE numeric_value.listing_id = %s AND EXISTS (
+               SELECT 1 FROM app.listings AS listing
+               WHERE listing.id = numeric_value.listing_id AND listing.owner_id = %s
+           )
+           ORDER BY numeric_value.field""",
+        (listing_id, owner_id),
+    ).fetchall()
+    answer_map: dict[str, list[str]] = {}
+    for attribute_key, option_key in answers:
+        answer_map.setdefault(attribute_key, []).append(option_key)
+    return {
+        "id": str(row[0]), "title": row[1], "rent_amount": str(row[2]),
+        "size_unit": row[3], "point": {"lat": float(row[4]), "lng": float(row[5])},
+        "status": row[6], "version": row[7],
+        "created_at": row[8].isoformat(), "updated_at": row[9].isoformat(),
+        "archived_from_status": row[10],
+        "archived_at": row[11].isoformat() if row[11] else None,
+        "status_changed_at": row[12].isoformat(),
+        "answers": answer_map,
+        "numeric": {key: str(value) for key, value in numeric},
+    }
+
+
+def _validate_answer_payload(conn: psycopg.Connection, answers: dict[str, list[str] | str]) -> list[tuple[str, str]]:
+    registry_rows = conn.execute(
+        """SELECT attribute.key, attribute.type, option.label, option.is_exclusive
+           FROM app.attributes AS attribute
+           LEFT JOIN app.attribute_options AS option
+             ON option.attribute_id = attribute.id AND option.is_active
+           WHERE attribute.is_active"""
+    ).fetchall()
+    registry: dict[str, dict[str, Any]] = {}
+    for key, pick_type, option_label, exclusive in registry_rows:
+        item = registry.setdefault(key, {"type": pick_type, "options": {}})
+        if option_label is not None:
+            item["options"][option_label] = bool(exclusive)
+
+    normalized: list[tuple[str, str]] = []
+    invalid = False
+    for key, raw_values in answers.items():
+        values = [raw_values] if isinstance(raw_values, str) else raw_values
+        attribute = registry.get(key)
+        if attribute is None or len(values) != len(set(values)):
+            invalid = True
+            continue
+        if attribute["type"] in {"single", "yes_no"} and len(values) > 1:
+            invalid = True
+        if any(option not in attribute["options"] for option in values):
+            invalid = True
+            continue
+        if any(attribute["options"][option] for option in values) and len(values) > 1:
+            invalid = True
+        normalized.extend((key, option) for option in values)
+    if invalid:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "INVALID_ANSWERS", "message": "Answers contain an invalid attribute or option selection"},
+        )
+    return normalized
+
+
+NUMERIC_LISTING_FIELDS = {
+    "bedrooms", "bathrooms_total", "western_commodes", "indian_squat_toilets",
+    "kitchen_count", "balconies", "total_floors", "size_value", "max_people",
+    "road_access_width_ft", "main_road_distance_km",
+}
+
+
+def _validate_numeric_payload(conn: psycopg.Connection, values: dict[str, float]) -> dict[str, Decimal]:
+    active = {
+        row[0] for row in conn.execute(
+            "SELECT key FROM app.numeric_fields WHERE is_active AND key <> 'rent_amount'"
+        ).fetchall()
+    }
+    if not set(values).issubset(NUMERIC_LISTING_FIELDS & active):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "INVALID_NUMERIC_FIELDS", "message": "Numeric fields contain an unsupported key"},
+        )
+    return {key: Decimal(str(value)) for key, value in values.items()}
+
+
+@app.post("/listings", status_code=201)
+def create_listing(
+    body: ListingCreate,
+    profile: Annotated[dict[str, Any], Depends(get_current_profile)],
+) -> dict[str, Any]:
+    owner_id = str(profile["id"])
+    try:
+        with get_db_connection() as conn:
+            conn.execute("SELECT set_config('app.user_id', %s, true)", (owner_id,))
+            conn.execute("SELECT set_config('app.actor', 'owner', true)")
+            # Serialize per-owner draft counts so concurrent creates cannot exceed the cap.
+            conn.execute("SELECT id FROM app.profiles WHERE id = %s FOR UPDATE", (owner_id,))
+            count = conn.execute(
+                "SELECT count(*) FROM app.listings WHERE owner_id = %s AND status = 'draft'",
+                (owner_id,),
+            ).fetchone()[0]
+            if count >= 20:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "DRAFT_LIMIT", "message": "Maximum number of drafts reached"},
+                )
+            listing_id = conn.execute(
+                """INSERT INTO app.listings (owner_id, title, rent_amount, point, size_unit)
+                   VALUES (%s, %s, %s,
+                     extensions.st_setsrid(extensions.st_makepoint(%s, %s), 4326)::extensions.geography,
+                     %s)
+                   RETURNING id""",
+                (owner_id, body.title, body.rent_amount,
+                 body.point.lng, body.point.lat, body.size_unit),
+            ).fetchone()[0]
+            return _owned_listing_json(conn, owner_id, str(listing_id))
+    except HTTPException:
+        raise
+    except psycopg.Error as exc:
+        raise _listing_db_error(exc) from exc
+
+
+@app.get("/me/listings")
+def read_my_listings(
+    profile: Annotated[dict[str, Any], Depends(get_current_profile)],
+) -> dict[str, Any]:
+    owner_id = str(profile["id"])
+    with get_db_connection() as conn:
+        conn.execute("SELECT set_config('app.user_id', %s, true)", (owner_id,))
+        listing_ids = conn.execute(
+            "SELECT id FROM app.listings WHERE owner_id = %s ORDER BY created_at DESC, id",
+            (owner_id,),
+        ).fetchall()
+        listings = [_owned_listing_json(conn, owner_id, str(row[0])) for row in listing_ids]
+    return {"listings": listings}
+
+
+@app.get("/me/listings/{listing_ref}")
+def read_my_listing(
+    listing_ref: str,
+    profile: Annotated[dict[str, Any], Depends(get_current_profile)],
+) -> dict[str, Any]:
+    try:
+        listing_id = str(UUID(listing_ref))
+    except ValueError:
+        raise _listing_not_found()
+    owner_id = str(profile["id"])
+    with get_db_connection() as conn:
+        conn.execute("SELECT set_config('app.user_id', %s, true)", (owner_id,))
+        return _owned_listing_json(conn, owner_id, listing_id)
+
+
+@app.patch("/listings/{listing_ref}")
+def patch_listing(
+    listing_ref: str,
+    body: ListingPatch,
+    profile: Annotated[dict[str, Any], Depends(get_current_profile)],
+) -> dict[str, Any]:
+    try:
+        listing_id = str(UUID(listing_ref))
+    except ValueError:
+        raise _listing_not_found()
+    owner_id = str(profile["id"])
+    explicitly_set = body.model_fields_set - {"version"}
+    for key in {"title", "rent_amount", "point", "answers", "numeric"} & explicitly_set:
+        if getattr(body, key) is None:
+            raise HTTPException(status_code=422, detail={"code": "INVALID_LISTING_DATA", "message": f"{key} cannot be null"})
+    try:
+        with get_db_connection() as conn:
+            conn.execute("SELECT set_config('app.user_id', %s, true)", (owner_id,))
+            conn.execute("SELECT set_config('app.actor', 'owner', true)")
+            current = conn.execute(
+                "SELECT status, version, suspended_at FROM app.listings WHERE id = %s AND owner_id = %s FOR UPDATE",
+                (listing_id, owner_id),
+            ).fetchone()
+            if current is None:
+                raise _listing_not_found()
+            if current[1] != body.version:
+                raise HTTPException(status_code=409, detail={"code": "VERSION_CONFLICT", "message": "Listing version is stale"})
+            if current[2] is not None:
+                raise HTTPException(status_code=409, detail={"code": "LISTING_SUSPENDED", "message": "Suspended listings cannot be changed"})
+            if current[0] == "archived":
+                raise HTTPException(status_code=409, detail={"code": "LISTING_NOT_EDITABLE", "message": "Archived listings cannot be changed"})
+
+            assignments: list[str] = []
+            values: list[Any] = []
+            if "title" in explicitly_set:
+                assignments.append("title = %s")
+                values.append(body.title)
+            if "rent_amount" in explicitly_set:
+                assignments.append("rent_amount = %s")
+                values.append(body.rent_amount)
+            if "size_unit" in explicitly_set:
+                assignments.append("size_unit = %s")
+                values.append(body.size_unit)
+            if "point" in explicitly_set:
+                assignments.append("point = extensions.st_setsrid(extensions.st_makepoint(%s, %s), 4326)::extensions.geography")
+                values.extend((body.point.lng, body.point.lat))
+            if assignments:
+                conn.execute(
+                    f"UPDATE app.listings SET {', '.join(assignments)} WHERE id = %s AND owner_id = %s",
+                    (*values, listing_id, owner_id),
+                )
+
+            if "answers" in explicitly_set:
+                normalized = _validate_answer_payload(conn, body.answers or {})
+                conn.execute(
+                    """DELETE FROM app.listing_answers AS answer
+                       WHERE answer.listing_id = %s AND EXISTS (
+                         SELECT 1 FROM app.listings AS listing
+                         WHERE listing.id = answer.listing_id AND listing.owner_id = %s
+                       )""",
+                    (listing_id, owner_id),
+                )
+                for attribute_key, option_key in normalized:
+                    conn.execute(
+                        """INSERT INTO app.listing_answers (listing_id, attribute_id, option_id)
+                           SELECT %s, attribute.id, option.id
+                           FROM app.attributes AS attribute
+                           JOIN app.attribute_options AS option ON option.attribute_id = attribute.id
+                           WHERE attribute.key = %s AND attribute.is_active
+                             AND option.label = %s AND option.is_active
+                             AND EXISTS (SELECT 1 FROM app.listings AS listing
+                                         WHERE listing.id = %s AND listing.owner_id = %s)""",
+                        (listing_id, attribute_key, option_key, listing_id, owner_id),
+                    )
+
+            if "numeric" in explicitly_set:
+                numeric = _validate_numeric_payload(conn, body.numeric or {})
+                conn.execute(
+                    """DELETE FROM app.listing_numeric AS numeric_value
+                       WHERE numeric_value.listing_id = %s AND EXISTS (
+                         SELECT 1 FROM app.listings AS listing
+                         WHERE listing.id = numeric_value.listing_id AND listing.owner_id = %s
+                       )""",
+                    (listing_id, owner_id),
+                )
+                for field, value in numeric.items():
+                    conn.execute(
+                        """INSERT INTO app.listing_numeric (listing_id, field, value)
+                           SELECT %s, numeric_field.key, %s
+                           FROM app.numeric_fields AS numeric_field
+                           WHERE numeric_field.key = %s AND numeric_field.is_active
+                             AND EXISTS (SELECT 1 FROM app.listings AS listing
+                                         WHERE listing.id = %s AND listing.owner_id = %s)""",
+                        (listing_id, value, field, listing_id, owner_id),
+                    )
+            return _owned_listing_json(conn, owner_id, listing_id)
+    except HTTPException:
+        raise
+    except psycopg.Error as exc:
+        raise _listing_db_error(exc) from exc
+
+
+def _call_listing_function(
+    function_sql: str,
+    listing_ref: str,
+    profile: dict[str, Any],
+    args: tuple[Any, ...] = (),
+) -> Any:
+    try:
+        listing_id = str(UUID(listing_ref))
+    except ValueError:
+        raise _listing_not_found()
+    owner_id = str(profile["id"])
+    try:
+        with get_db_connection() as conn:
+            conn.execute("SELECT set_config('app.user_id', %s, true)", (owner_id,))
+            result = conn.execute(function_sql, (listing_id, *args)).fetchone()[0]
+            return result
+    except psycopg.Error as exc:
+        raise _listing_db_error(exc) from exc
+
+
+def _listing_after_function(listing_ref: str, profile: dict[str, Any], function_sql: str, args: tuple[Any, ...] = ()) -> dict[str, Any]:
+    _call_listing_function(function_sql, listing_ref, profile, args)
+    return read_my_listing(listing_ref, profile)
+
+
+@app.post("/listings/{listing_ref}/publish")
+def publish_owner_listing(listing_ref: str, profile: Annotated[dict[str, Any], Depends(get_current_profile)]) -> dict[str, Any]:
+    return _listing_after_function(listing_ref, profile, "SELECT app.publish_listing(%s)")
+
+
+@app.post("/listings/{listing_ref}/status")
+def set_owner_listing_status(listing_ref: str, body: ListingStatusInput, profile: Annotated[dict[str, Any], Depends(get_current_profile)]) -> dict[str, Any]:
+    return _listing_after_function(listing_ref, profile, "SELECT app.set_listing_status(%s, %s)", (body.status,))
+
+
+@app.post("/listings/{listing_ref}/archive")
+def archive_owner_listing(listing_ref: str, profile: Annotated[dict[str, Any], Depends(get_current_profile)]) -> dict[str, Any]:
+    return _listing_after_function(listing_ref, profile, "SELECT app.archive_listing(%s)")
+
+
+@app.post("/listings/{listing_ref}/restore")
+def restore_owner_listing(listing_ref: str, profile: Annotated[dict[str, Any], Depends(get_current_profile)]) -> dict[str, Any]:
+    return _listing_after_function(listing_ref, profile, "SELECT app.restore_listing(%s)")
+
+
+@app.delete("/listings/{listing_ref}")
+def delete_owner_listing(listing_ref: str, profile: Annotated[dict[str, Any], Depends(get_current_profile)]) -> dict[str, Any]:
+    paths = _call_listing_function("SELECT app.force_delete_listing(%s)", listing_ref, profile)
+    return {"deleted": True, "storage_paths": paths}
 
 
 @app.get("/listings")

@@ -177,6 +177,7 @@ Boosted listings, reports on profiles, push notifications, Idempotency-Key table
 2. `profiles`, JWT verification, auth middleware, the deletion-requested check.
 3. Tenant current and search locations as a point plus radius, registry from section 16. Add a regression test proving `anon` and `authenticated` cannot execute `app.get_public_profile(uuid)`.
 4. Listings, lifecycle triggers, photos, version handling, numeric fields. Tighten `app.get_public_profile(p_id)` to return contact details only when that profile owns a publicly visible listing (`status = 'active' AND suspended_at IS NULL`), and test that profiles without one are excluded.
+4c. Owner listing routes: create drafts, owner reads, versioned PATCH with registry-validated answers and numeric values, and lifecycle calls through the existing database functions. Enforce the 20-draft cap and 20 writes/minute/user limit.
 5. Public reads, map with clustering, rate limits.
 6. Requirements and matching (perfect, strong, conflicts tiers).
 7. Connect, notifications sidebar.
@@ -243,6 +244,19 @@ Boosted listings, reports on profiles, push notifications, Idempotency-Key table
 - `test_restore_and_reactivation_require_whatsapp_then_succeed`
 - `test_restored_listing_returns_to_public_reads`
 - `test_whatsapp_clear_never_touches_foreign_listings`
+
+**Owner listing routes**
+
+- `test_owner_full_listing_lifecycle_and_public_phone`
+- `test_publish_error_names_missing_answers_numeric_and_whatsapp`
+- `test_patch_stale_version_and_valid_patch_bump`
+- `test_patch_rejects_protected_fields`
+- `test_patch_rejects_invalid_option_wrong_attribute_cardinality_and_rent_numeric`
+- `test_foreign_user_gets_not_found_on_all_owner_id_routes`
+- `test_suspended_listing_locked_for_owner_on_write_routes`
+- `test_draft_cap_twenty`
+- `test_write_rate_limit_returns_429`
+- `test_phone_never_appears_in_owner_route_error_or_logs`
 
 **Idempotency and jobs**
 

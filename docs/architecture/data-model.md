@@ -42,7 +42,7 @@ Registry values are owner-managed and are not writable by landlords or `rentra_a
 - `suspended_at`, `suspended_by`, `suspended_reason`
 - `version`, `created_at`, `updated_at`
 
-There is no description, `area_id`, or `district_id` column. A listing is public only while active and not suspended. Owners can read their own listings at every status and can write only their own.
+There is no description, `area_id`, or `district_id` column. A listing is public only while active and not suspended. Owners can read their own listings at every status and can write only their own through the versioned owner listing routes; answer and numeric sets are registry-validated.
 
 ### Listing children
 

@@ -21,7 +21,7 @@ The API uses the Supabase transaction pooler. The service role key is reserved f
 
 1. Visitors browse public pages and publicly visible listings without signing in.
 2. Listing reads go through the FastAPI backend. A listing is public only when active and not suspended; public listing details include its point and contact phone as decided in the handoff.
-3. Authenticated writes use the caller's profile identity. Listing mutations are scoped to the owner, and row-level security provides a second boundary.
+3. Authenticated writes use the caller's profile identity. Owner listing routes create drafts, apply versioned edits, and call the database lifecycle functions; owner predicates and row-level security provide defense in depth.
 4. A contact action opens a WhatsApp link; Rentra does not provide in-app chat.
 
 Clearing WhatsApp through the profile API requires confirmation. The API archives the owner's active, non-suspended listings before clearing it; an active suspended listing blocks the operation. Restoring a listing that was active, and reactivating, require WhatsApp.

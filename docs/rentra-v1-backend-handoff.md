@@ -19,7 +19,7 @@ Tags: **[PRODUCT]** decided by the owner. **[ENG]** engineering default, changea
 - Migrations: Supabase CLI SQL migrations in `supabase/migrations`. One table per migration, with its RLS, constraints, and indexes in the same file. [ENG]
 - Tests run against a real local Supabase Postgres (`supabase start`), never mocks. [ENG]
 - Types: `timestamptz` UTC, `uuid` primary keys (`gen_random_uuid()`), rent as `numeric(12,2)` NPR with `CHECK (rent_amount > 0)`. Enums or CHECK for fixed sets. NOT NULL by default. Every FK has an explicit `ON DELETE` and a child-side index.
-- Core listing fields (rent, bedrooms, etc.) come from the original spec, which this doc does not repeat. [UNVERIFIED] Reconcile before step 4.
+- Listing numeric fields and units are specified in section 16.2.
 
 ## 2. Access
 
@@ -40,12 +40,12 @@ Tags: **[PRODUCT]** decided by the owner. **[ENG]** engineering default, changea
 
 All in schema `app`. Names are guidance, constraints are required.
 
-- `profiles(id pk = auth.users.id ON DELETE CASCADE, display_name, whatsapp, deletion_requested_at, created_at)`. Created by upsert on first authenticated request. `whatsapp` is E.164 (+977), validated and stored normalized. Shown publicly on active listings. [PRODUCT]
+- `profiles(id pk = auth.users.id ON DELETE CASCADE, display_name, whatsapp, deletion_requested_at, created_at)`. Created by upsert on first authenticated request. `whatsapp` is E.164 (+977), validated and stored normalized. Shown publicly on active listings. Clearing it requires confirmation and archives the owner's active non-suspended listings; an active suspended listing blocks clearing. [PRODUCT]
 - Onboarding captures two locations for the tenant: current location and search location. Search location is the primary location for matching. If both are the same, that is fine. Store only a coarse area for each, never precise coordinates. The search area is stored as a point with a radius (default 5 km, tenant can adjust). The point is rounded to a coarse grid before storage, never the exact location. A listing's point must fall inside the search circle. [PRODUCT]
 - Registry: `attributes(id, key, type yes_no|single|multi, is_active, required_at_publish)`, `attribute_options(id, attribute_id, label, is_exclusive, is_active)`. FKs `ON DELETE RESTRICT`. Never delete, only `is_active=false`. Options are a fixed list that only the owner adds to. Landlords cannot create options. Seed in section 16.
-- `listings(id, owner_id FK profiles CASCADE, title, rent_amount, area_id, district_id, point geography(Point,4326), status, archived_from_status, archived_at, status_changed_at, suspended_at, suspended_by, suspended_reason, version int, created_at, updated_at)`. CHECK: point inside Nepal bounding box, no NaN. The bounding box also includes parts of India and Tibet, accepted for V1. Exact pin is public for every listing. [PRODUCT]
+- `listings(id, owner_id FK profiles CASCADE, title, rent_amount numeric(12,2), point geography(Point,4326), status, archived_from_status, archived_at, status_changed_at, suspended_at, suspended_by, suspended_reason, version int, created_at, updated_at)`. Rent is stored here only, not in `listing_numeric`. CHECK: rent is positive; point is inside Nepal bounding box and not NaN. The bounding box also includes parts of India and Tibet, accepted for V1. Exact pin is public for every listing. [PRODUCT]
 - `listing_answers(listing_id, attribute_id, option_id)`, PK is all three. Yes/no attributes store the answer as an option row (Yes / No).
-- `listing_numeric(listing_id, field, value)`, for the numeric fields in section 16.
+- `listing_numeric(listing_id, field, value)`, for the numeric fields in section 16 other than `rent_amount`, which is a listing column.
 - `listing_photos(id, listing_id, storage_path, position smallint CHECK 1..10, UNIQUE(listing_id, position))`. Photo cap of 10 comes from this constraint, not app code.
 - Requirements: `requirements(user_id, attribute_id, option_id, importance must|nice)`, plus numeric requirements `requirement_numeric(user_id, field, value, importance)` for rent max, bedrooms min, max people, and any numeric field in section 16. Each carries its own importance. Pick-one attributes: denormalize `pick_rule` onto the row with a composite FK to the registry, and `UNIQUE (user_id, attribute_id) WHERE importance='must' AND pick_rule='single'`.
 - `connections(id, user_id FK CASCADE, listing_id FK CASCADE, created_at, UNIQUE(user_id, listing_id))`. Indexes `(user_id, created_at)` and `(listing_id, created_at)`.
@@ -53,7 +53,7 @@ All in schema `app`. Names are guidance, constraints are required.
 - `saved_listings(user_id, listing_id, created_at)`, PK both.
 - `reports(id, reporter_id SET NULL, listing_id SET NULL, snapshot_title, snapshot_whatsapp, reason, status open|resolved, resolved_by, resolved_at, created_at)`, `UNIQUE(reporter_id, listing_id)`. Snapshot is copied at submit so evidence survives deletion. Listings only, no profile reports.
 - `admins`, `admin_actions`, `legal_access_log`, `job_runs(job, started_at, finished_at, rows, error)`, `storage_deletions(id, bucket, path, attempts, created_at, done_at)`.
-- Required indexes: partial on listings `(district_id, rent_amount) WHERE status='active' AND suspended_at IS NULL` and the same for `area_id`; partial GiST on `point` with the same filter; `listing_answers(attribute_id, option_id, listing_id)`; `listings(owner_id, status)`; `listings(status, status_changed_at)`; `listings(archived_at) WHERE status='archived'`.
+- Required indexes: partial on listings `(rent_amount) WHERE status='active' AND suspended_at IS NULL`; partial GiST on `point` with the same filter; `listing_answers(attribute_id, option_id, listing_id)`; `listings(owner_id, status)`; `listings(status, status_changed_at)`; `listings(archived_at) WHERE status='archived'`.
 
 ## 4. Listing lifecycle
 
@@ -74,6 +74,7 @@ Statuses: `draft, active, rented, sold_out, unavailable, archived`. No `deleted`
 - [PRODUCT] Archived listings are purged 30 days after archiving, no exceptions. The owner can restore or force delete before that.
 - Archive is the only way a listing leaves the public view. Force delete is the owner's immediate hard delete of an archived listing.
 - Suspended listings: the owner cannot change status, archive, restore, or delete. Jobs skip suspended listings (no auto-archive, no purge), so evidence is never destroyed by a timer.
+- Clearing WhatsApp requires `{confirm:true}` through `PUT /me`. In one transaction, every owned active non-suspended listing is archived and then the profile number is cleared. Draft, rented, sold-out, and unavailable listings are unchanged. If an active suspended listing exists, the clear fails with `WHATSAPP_REQUIRED_FOR_ACTIVE_LISTING` and the transaction makes no changes. A profile trigger blocks direct clearing while any active listing exists, including suspended listings. Restoring a listing that was active, and reactivating, require a non-empty WhatsApp number (`WHATSAPP_REQUIRED`).
 - A DB trigger enforces every row above and rejects all other transitions. The API sets `app.actor` (`owner`, `system`, `admin`) per transaction and the trigger checks it. Each change sets `status_changed_at` and bumps `version`.
 - Archive job: one set-based UPDATE, `WHERE status IN (...) AND status_changed_at < now() - interval '30 days' AND suspended_at IS NULL`. This closes the race with a landlord reactivating at day 30.
 - Edits: `PATCH` carries `version`. Mismatch returns 409. A trigger bumps `listings.version` on any child write (answers, numeric fields, photos).
@@ -103,11 +104,11 @@ Errors are JSON `{code, message}` with stable codes. Generic message outside, de
 | --- | --- | --- |
 | `GET /health`, `GET /health/ready` | none | ready runs `SELECT 1` as `rentra_api` |
 | `GET /profiles/{profile_id}` | none | public profile response contains only `display_name` and `whatsapp`; query runs as `rentra_api` with the target profile scoped through RLS |
-| `GET /areas`, `GET /registry` | none |  |
+| `GET /areas`, `GET /registry` | none | `/areas` returns an empty collection until an area table exists. |
 | `GET /listings` | none | keyset, page max 50, includes phone and point, same as detail |
 | `GET /listings/{id}` | none | full detail, includes phone and point |
 | `GET /map?bbox=&zoom=` | none | bbox and zoom required. Returns server-side clusters at low zoom and individual points at high zoom. Each cluster returns count and centroid. Individual points return id, lat, lng, rent only. Response is capped. [ENG] |
-| `GET/PUT /me`, `DELETE /me` | user | delete needs `{confirm:true}` |
+| `GET/PUT /me`, `DELETE /me` | user | delete needs `{confirm:true}`. `PUT /me` with `whatsapp:null` or an empty string clears it; the API first returns `WHATSAPP_CLEAR_ARCHIVES_LISTINGS` with the active non-suspended listing count, then requires `{confirm:true}` to archive those listings and clear the number. |
 | `PUT /me/requirements`, `GET /matches` | user |  |
 | `POST/DELETE /listings/{id}/save`, `GET /me/saved` | user |  |
 | `POST /listings/{id}/connect`, `GET /me/connections` | user | see section 7 |
@@ -174,7 +175,7 @@ Boosted listings, reports on profiles, push notifications, Idempotency-Key table
 
 1. `rentra_api` role, schema `app`, default privileges, RLS baseline, test harness on local Supabase.
 2. `profiles`, JWT verification, auth middleware, the deletion-requested check.
-3. Tenant current and search locations, registry from section 16 (search area format is open, see section 15). Add a regression test proving `anon` and `authenticated` cannot execute `app.get_public_profile(uuid)`.
+3. Tenant current and search locations as a point plus radius, registry from section 16. Add a regression test proving `anon` and `authenticated` cannot execute `app.get_public_profile(uuid)`.
 4. Listings, lifecycle triggers, photos, version handling, numeric fields. Tighten `app.get_public_profile(p_id)` to return contact details only when that profile owns a publicly visible listing (`status = 'active' AND suspended_at IS NULL`), and test that profiles without one are excluded.
 5. Public reads, map with clustering, rate limits.
 6. Requirements and matching (perfect, strong, conflicts tiers).
@@ -218,7 +219,6 @@ Boosted listings, reports on profiles, push notifications, Idempotency-Key table
 - `test_missing_answer_on_must_is_miss`
 - `test_pick_one_second_must_rejected_by_db`
 - `test_own_listing_excluded`
-- `test_area_and_district_match`
 - `test_tiebreak_order_all_tiers`
 - `test_strong_and_conflicts_capped_200_100_perfect_uncapped`
 - `test_no_requirements_gets_explore_feed`
@@ -236,6 +236,13 @@ Boosted listings, reports on profiles, push notifications, Idempotency-Key table
 - `test_abandoned_draft_purged`
 - `test_photo_cap_race_two_uploads`
 - `test_version_conflict_409_and_child_write_bumps_version`
+- `test_clear_without_confirm_is_rejected_and_changes_nothing`
+- `test_confirmed_clear_archives_only_active_non_suspended_listings`
+- `test_suspended_active_listing_blocks_whatsapp_clear`
+- `test_direct_whatsapp_clear_is_rejected_while_listing_is_active`
+- `test_restore_and_reactivation_require_whatsapp_then_succeed`
+- `test_restored_listing_returns_to_public_reads`
+- `test_whatsapp_clear_never_touches_foreign_listings`
 
 **Idempotency and jobs**
 
@@ -262,8 +269,8 @@ Boosted listings, reports on profiles, push notifications, Idempotency-Key table
 
 ## 15. Dependencies and pending items
 
-- No district or city seed. The map handles location browsing. Search area is a point with a radius, as decided. The parking-lot doc is also not written.
-- Core listing fields live in the original spec and were not part of this review. Reconcile them with section 3 before step 4.
+- No district or city seed. The map handles location browsing. Search area is a point with a radius. The parking-lot doc is also not written.
+- Real GiST index usage is proven by the step 10 staging load test at 20k listings; small local EXPLAIN fixtures verify partial index availability and predicates, not actual GiST selection.
 - Cloudflare in front of the API, a privacy policy, and a consent line at publish ("your number and pin are public") are pre-launch items.
 - Nepal rental law: the AI-generated summary is unverified and needs a Nepali lawyer check before any terms or in-app wording. The Family and Bachelors options stay as registry rows so they can be removed before launch if the team decides. [PRODUCT]
 - Legal review of phone publication and legal-order access is deferred until after launch. [PRODUCT]
@@ -321,11 +328,11 @@ Notes per attribute:
 
 ### 16.2 Numeric fields
 
-These are stored in `listing_numeric` for listings and `requirement_numeric` for tenants. Each tenant numeric requirement carries must or nice.
+Listing values are stored in `listing_numeric` except `rent_amount`, which is stored only on `listings`. Tenant numeric requirements are stored in `requirement_numeric`, and each carries must or nice.
 
 | field | unit | notes |
 | --- | --- | --- |
-| `rent_amount` | NPR per month | listing rent. Tenant side is a max rent |
+| `rent_amount` | NPR per month | listing column. Tenant side is a max rent |
 | `bedrooms` | count | tenant side is a min |
 | `bathrooms_total` | count | |
 | `western_commodes` | count | |

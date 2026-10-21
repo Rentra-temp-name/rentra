@@ -1,27 +1,29 @@
 # System Overview
 
-Status: draft. Will change as decisions change.
+Status: current V1 decisions follow [`rentra-v1-backend-handoff.md`](../rentra-v1-backend-handoff.md).
 
 ## Components
 
-- **Frontend (apps/web):** Next.js, deployed on Cloudflare Workers with OpenNext. Moves to Vercel later.
-- **Backend (apps/api):** FastAPI, packaged as a Docker container. Host not chosen yet (Render or Railway).
-- **Database, auth, storage:** Supabase (Postgres, Google sign-in, file storage for listing photos).
-- **Contact:** WhatsApp links to the landlord. No in-app chat.
-- **Email:** Resend.
-- **Version control:** GitHub.
-- **Domain:** Namecheap (name not final).
+- **Frontend (`apps/web`):** Next.js on Cloudflare Workers with OpenNext; Vercel is a later move.
+- **Backend (`apps/api`):** FastAPI in Docker. Its hosting provider is still undecided.
+- **Database and auth:** Supabase Postgres and Supabase Auth (Google OAuth).
+- **Photo storage:** Supabase Storage; uploads go through the API.
+- **Email:** Resend for transactional email.
+- **Map:** the browser uses the Maps key; the API reads `google_maps_key` from its environment.
 
-## How a request flows
+## Database boundary
 
-1. The visitor loads a page from the Next.js app.
-2. Pages that show listings read them from the FastAPI backend.
-3. Logged-in actions (save, preferences, create or edit listing) go through the backend, which checks the user's role.
-4. The backend reads and writes Supabase. Row Level Security is enforced on every table.
-5. Tapping the WhatsApp button opens a WhatsApp link. No data goes through Rentra.
+Application tables are in the `app` schema, which is not exposed through PostgREST. `anon` and `authenticated` have no privileges on that schema. The API connects as `rentra_api`, a login role without `BYPASSRLS` and without ownership of application tables. Each request transaction sets `app.user_id`; RLS enforces ownership and public listing visibility, while owner-scoped API queries also include an owner predicate.
 
-## Principles
+The API uses the Supabase transaction pooler. The service role key is reserved for the Auth admin API and Storage API; it is not used for database queries.
 
-- Browsing is open. Login is needed only for actions that change data or depend on a user.
-- Business logic (matching and scoring) lives in the backend's domain layer, not in the frontend.
-- Everything is configured through environment variables, so changing hosts is a deploy setting.
+## Request flow
+
+1. Visitors browse public pages and publicly visible listings without signing in.
+2. Listing reads go through the FastAPI backend. A listing is public only when active and not suspended; public listing details include its point and contact phone as decided in the handoff.
+3. Authenticated writes use the caller's profile identity. Listing mutations are scoped to the owner, and row-level security provides a second boundary.
+4. A contact action opens a WhatsApp link; Rentra does not provide in-app chat.
+
+Clearing WhatsApp through the profile API requires confirmation. The API archives the owner's active, non-suspended listings before clearing it; an active suspended listing blocks the operation. Restoring a listing that was active, and reactivating, require WhatsApp.
+
+Matching and ranking belong in the backend domain/SQL layer. Secrets are provided through environment variables and are never logged or committed.

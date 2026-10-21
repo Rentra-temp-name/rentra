@@ -6,7 +6,8 @@ Status: partially decided. Items marked "Open" need a decision.
 
 - Public pages (landing, Rent, listing pages, About, Contact): top header.
 - After login: the app switches to a sidebar layout, similar to MissLogger.
-- Browsing is open to everyone. Login is required only for actions like save, preferences, and listing a property.
+- Browsing is open to everyone. Login is required only for actions like save, requirements, and listing a property.
+- Tenant and landlord are switchable modes for a signed-in user, not stored roles. Switching modes keeps both sides' data.
 
 ## Public header
 
@@ -26,14 +27,17 @@ Status: partially decided. Items marked "Open" need a decision.
 
 ## App after login (sidebar)
 
-- **Home** with four sections:
-  - For You: listings ranked by the tenant's preferences (matching)
-  - Featured: boosted listings
+- **Home** with three sections:
+  - For You: listings matched to the user's requirements
   - Explore: listings shuffled once a day
   - Saved: favorited listings
 - **Map** page
 - Landlord items: My listings, Dashboard (shown to landlords)
 - Account
+
+Landlord listing states are draft, active, rented, sold_out, unavailable, and archived. Only active, unsuspended listings are public. Listing management is available to the owner.
+
+Clearing WhatsApp in the profile requires confirmation. Active, non-suspended listings are archived as part of the clear; if an active suspended listing exists, the clear is blocked. Restoring a listing that was active, and reactivating, require WhatsApp.
 
 ## Page map
 
@@ -54,7 +58,6 @@ Status: partially decided. Items marked "Open" need a decision.
 
 ## Open
 
-- **Featured (boosted):** label kept as "boosted." How listings get boosted (paid or hand-picked) is not decided. Paid boosting depends on payments, which are Later in the MVP scope, so until that's decided, boosted listings are set by the team.
 - **Explore:** decided. Listings are shuffled once a day.
-- **For You before preferences:** decided. Visitors without preferences see a prompt to set their preferences in For You. Set-up flow for that prompt is open.
+- **For You before requirements:** users without requirements see a prompt to set them in For You. Set-up flow for that prompt is open.
 - **Landing map section:** decided. A static image the team designs and supplies, with a "View on map" button. Replaced by the live map once a provider is chosen.

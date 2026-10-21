@@ -9,14 +9,15 @@ Rentra is a rental marketplace for Nepal, connecting tenants with landlords and 
 ## In MVP
 
 **Listings (landlord side)**
-- Post, edit, pause, and delete listings
-- Listings go live immediately when posted. No verification step for now.
+- Create drafts, edit, publish, change status, archive, restore, and delete owned listings
+- Publishing requires the required listing fields, required answers (including amenities), and a phone number on the profile. No verification step is used.
+- Only active, unsuspended listings are public.
 - Seller dashboard with an overview of listing performance (views, inquiries)
 
 **Discovery (tenant side)**
 - Home feed of new and recommended listings
 - Advanced filters
-- Preference matching: tenants set preferences (for example pets, smoking) and get better matches
+- Requirements matching: users set must-have and nice-to-have requirements (for example pets and smoking) and get better matches
 - Matching feels seamless: no waiting, no page reloads
 
 **Map**
@@ -31,7 +32,7 @@ Rentra is a rental marketplace for Nepal, connecting tenants with landlords and 
 
 **Accounts**
 - Sign-in with Google through Supabase
-- Two roles: tenant and landlord
+- Tenant and landlord are switchable user modes, not stored roles. User data for both modes remains available when switching.
 
 ## Later (not in MVP)
 

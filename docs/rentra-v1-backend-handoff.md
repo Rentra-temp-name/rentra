@@ -46,7 +46,7 @@ All in schema `app`. Names are guidance, constraints are required.
 - `listings(id, owner_id FK profiles CASCADE, title, rent_amount numeric(12,2), point geography(Point,4326), status, archived_from_status, archived_at, status_changed_at, suspended_at, suspended_by, suspended_reason, version int, created_at, updated_at)`. Rent is stored here only, not in `listing_numeric`. CHECK: rent is positive; point is inside Nepal bounding box and not NaN. The bounding box also includes parts of India and Tibet, accepted for V1. Exact pin is public for every listing. [PRODUCT]
 - `listing_answers(listing_id, attribute_id, option_id)`, PK is all three. Yes/no attributes store the answer as an option row (Yes / No).
 - `listing_numeric(listing_id, field, value)`, for the numeric fields in section 16 other than `rent_amount`, which is a listing column.
-- `listing_photos(id, listing_id, storage_path, thumb_path, width int CHECK (width > 0), height int CHECK (height > 0), position smallint CHECK 1..10, UNIQUE(listing_id, position) DEFERRABLE INITIALLY DEFERRED)`. Photo cap of 10 comes from the position check constraint, not app code.
+- `listing_photos(id, listing_id, storage_path, thumb_path, width int NOT NULL CHECK (width > 0), height int NOT NULL CHECK (height > 0), position smallint NOT NULL CONSTRAINT listing_photos_position_check CHECK (position BETWEEN 1 AND 10), CONSTRAINT listing_photos_listing_position_key UNIQUE (listing_id, position) DEFERRABLE INITIALLY DEFERRED)`. Photo cap of 10 comes from the position check constraint, not app code.
 - Requirements: `requirements(user_id, attribute_id, option_id, importance must|nice)`, plus numeric requirements `requirement_numeric(user_id, field, value, importance)` for rent max, bedrooms min, max people, and any numeric field in section 16. Each carries its own importance. Pick-one attributes: denormalize `pick_rule` onto the row with a composite FK to the registry, and `UNIQUE (user_id, attribute_id) WHERE importance='must' AND pick_rule='single'`.
 - `connections(id, user_id FK CASCADE, listing_id FK CASCADE, created_at, UNIQUE(user_id, listing_id))`. Indexes `(user_id, created_at)` and `(listing_id, created_at)`.
 - `notifications(id, user_id FK CASCADE, kind, listing_id, other_user_id, created_at, read_at)`. Typed columns, no jsonb. Powers the in-app notifications sidebar.
@@ -98,7 +98,7 @@ Statuses: `draft, active, rented, sold_out, unavailable, archived`. No `deleted`
 
 ## 6. Endpoints
 
-Errors are JSON `{code, message}` with stable codes. Generic message outside, detail in logs.
+Errors use stable codes where defined. Direct JSON responses return `{code, message}` at the top level. FastAPI `HTTPException` responses put their detail under `detail` (sometimes a `{code, message}` object, sometimes a string); request-validation errors return a `detail` array. Generic message outside, detail in logs.
 
 | Route | Auth | Notes |
 | --- | --- | --- |
@@ -106,7 +106,7 @@ Errors are JSON `{code, message}` with stable codes. Generic message outside, de
 | `GET /profiles/{profile_id}` | none | public profile response contains only `display_name` and `whatsapp`; query runs as `rentra_api` with the target profile scoped through RLS |
 | `GET /areas`, `GET /registry` | none | `/areas` returns an empty collection until an area table exists. |
 | `GET /listings` | none | keyset, page max 50, includes phone and point, same as detail |
-| `GET /listings/{id}` | none | full detail, includes phone and point |
+| `GET /listings/{id}` | none | full detail, includes phone and point. Returns `photos` ordered by position; each item has `id`, `position`, `width`, `height`, `original_url`, and `thumb_url`. |
 | `GET /map?bbox=&zoom=` | none | bbox and zoom required. Returns server-side clusters at low zoom and individual points at high zoom. Each cluster returns count and centroid. Individual points return id, lat, lng, rent only. Response is capped. [ENG] |
 | `GET/PUT /me`, `DELETE /me` | user | delete needs `{confirm:true}`. `PUT /me` with `whatsapp:null` or an empty string clears it; the API first returns `WHATSAPP_CLEAR_ARCHIVES_LISTINGS` with the active non-suspended listing count, then requires `{confirm:true}` to archive those listings and clear the number. |
 | `PUT /me/requirements`, `GET /matches` | user |  |
@@ -114,7 +114,7 @@ Errors are JSON `{code, message}` with stable codes. Generic message outside, de
 | `POST /listings/{id}/connect`, `GET /me/connections` | user | see section 7 |
 | `GET /me/connections/profile/{user_id}` | user | connection-scoped profile; see section 7 |
 | `GET /me/notifications`, `POST /me/notifications/{id}/read` | user | feeds the sidebar |
-| `POST /listings` (draft), `GET /me/listings`, `GET /me/listings/{id}` | user | max 20 drafts per user [ENG] |
+| `POST /listings` (draft), `GET /me/listings`, `GET /me/listings/{id}` | user | max 20 drafts per user [ENG]. The owner detail route returns the same position-ordered `photos` array and fields as public detail. |
 | `PATCH /listings/{id}`, `POST /listings/{id}/publish`, `POST /listings/{id}/status`, `POST /listings/{id}/archive`, `POST /listings/{id}/restore`, `DELETE /listings/{id}` | owner | `DELETE` is force delete, allowed only on archived listings. PATCH requires `version`; when `answers` or `numeric` is supplied, it replaces the full set, so clients must send the full map. Answer option keys are registry option labels. Point input uses `lat`/`lng`. |
 | `POST /listings/{id}/photos` | owner | server-side multipart upload only; suspended and archived listings are locked |
 | `DELETE /listings/{id}/photos/{photo_id}` | owner | database row is deleted before best-effort object deletion |
@@ -153,7 +153,7 @@ Frontend URLs use `/rent/{slug}-{id}`. The API resolves by the trailing id. No s
 - A tenant's saved phone is visible to the owner of a listing they connected to. [PRODUCT]
 - Mass assignment: `PATCH` uses an explicit field allowlist. Never writable by the client: `owner_id`, `status`, `suspended_*`, `version` (it is only compared), `created_at`.
 - Validation at the boundary with strict Pydantic models. Reject NaN and out-of-range coordinates, oversize or malformed bodies, and unknown fields.
-- Photo upload goes through the API only. `Content-Length` is required (missing: 411) and requests declaring more than 5 MB plus 64 KB multipart overhead are rejected before the body is read; the API also enforces a 5 MB upload-stream limit. Jpeg/png/webp magic-byte checks ignore the client type and filename. Pillow enforces a decoded-pixel cap, applies EXIF orientation, then re-encodes originals without metadata and makes thumbnails by fitting the full image inside a fixed 400×300 (4:3) box, padding with the configured bar color as needed. Nothing is stretched or cropped to fill the frame. The original is never resized; the frontend letterboxes originals with CSS `object-fit: contain`. UUID object names are written through the API with the service key. The `listing-photos` bucket is assumed to exist and be public-read. [ENG]
+- Photo upload goes through the API only. `Content-Length` is required (missing or non-integer: 411); requests declaring more than 5 MiB plus 64 KiB multipart overhead receive 413 before the body is read. These pre-check responses are top-level `{code, message}` objects. The upload stream is also limited to 5 MiB; stream, image-type, and pixel-limit errors are raised as `HTTPException` and appear under `detail`. JPEG (including MPO, first frame only), PNG, and WebP are accepted by magic-byte/content checks, independent of client type and filename. Pillow enforces a 25,000,000-pixel cap, applies EXIF orientation, then re-encodes originals without metadata and makes thumbnails by fitting the full image inside a fixed 400×300 (4:3) box, padding with the configured bar color as needed. Nothing is stretched or cropped to fill the frame. The original is never resized; the frontend letterboxes originals with CSS `object-fit: contain`. UUID object names are written through the API with the service key. The `listing-photos` bucket is assumed to exist and be public-read. [ENG]
 - CORS: allowlist of the frontend origin only. No `*`.
 - No stack traces in responses. No user-supplied URLs are ever fetched.
 - Secrets only in env, including `google_maps_key`. `.env.example` lists names only. Never logged, never committed.

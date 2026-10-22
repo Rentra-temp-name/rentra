@@ -31,7 +31,7 @@ Tenant and landlord are switchable user modes, not stored roles. Switching modes
 
 `app.get_public_profile(p_id)` returns the profile contact fields only when that profile owns at least one listing where `status = 'active' AND suspended_at IS NULL`. Listing phone and point visibility follow the handoff's public-by-product decision.
 
-Owner listing endpoints require authentication and scope every listing lookup and write to the caller. Draft creation is capped at 20 per owner; PATCH requires the current version and validates answer and numeric keys against the active registry. Lifecycle endpoints call the database functions rather than directly updating protected listing fields.
+Owner listing endpoints require authentication and scope every listing lookup and write to the caller. Draft creation is capped at 20 per owner; PATCH requires the current version and validates answer and numeric keys against the active registry. Supplying answers or numeric replaces that full set; option keys are registry labels and point input uses `lat`/`lng`. Lifecycle endpoints call the database functions rather than directly updating protected listing fields.
 
 Clearing WhatsApp requires explicit confirmation and archives the owner's active, non-suspended listings in the same transaction. The database profile trigger rejects direct clears while any active listing exists, including suspended listings. Restoring a listing that was active, and reactivating, without a WhatsApp number is rejected with `WHATSAPP_REQUIRED`.
 

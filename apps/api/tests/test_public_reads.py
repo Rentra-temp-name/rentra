@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import logging
+import time
 import uuid
+from collections import deque
 
+import jwt
 import psycopg
+from cryptography.hazmat.primitives.asymmetric import ec
 from starlette.testclient import TestClient
 
 from rentra_api.config import get_settings
-from rentra_api.main import app, read_limiter
+from rentra_api.main import InProcessReadLimiter, app, read_limiter
 
 
 def ensure_profile(user: dict) -> None:
@@ -235,3 +239,67 @@ def test_explain_uses_partial_public_rent_and_point_indexes(test_database_url):
         assert "suspended_at is null" in normalized_indexdef
 
     # Real GiST usage is proven in the step 10 load test at 20k rows.
+
+
+def test_limiter_prunes_empty_keys():
+    limiter = InProcessReadLimiter()
+    limiter._events[("ip", "stale")] = deque()
+    limiter._last_sweep = 0
+    limiter.allow(("ip", "current"), limit=10, window=60)
+    assert ("ip", "stale") not in limiter._events
+
+
+def test_health_ready_not_rate_limited(monkeypatch):
+    monkeypatch.setattr(get_settings(), "READ_RATE_LIMIT_ANONYMOUS", 1)
+    with read_client() as client:
+        assert client.get("/areas").status_code == 200
+        assert client.get("/health/ready").status_code == 200
+        assert client.get("/health/ready").status_code == 200
+        assert client.get("/areas").status_code == 429
+
+
+def test_public_route_bad_token_is_anonymous(monkeypatch):
+    monkeypatch.setattr(get_settings(), "READ_RATE_LIMIT_ANONYMOUS", 1)
+    with read_client() as client:
+        public = client.get("/listings", headers={"Authorization": "Bearer malformed"})
+        limited = client.get("/areas")
+    assert public.status_code == 200
+    assert limited.status_code == 429
+
+
+def test_public_route_expired_token_is_anonymous(monkeypatch):
+    monkeypatch.setattr(get_settings(), "READ_RATE_LIMIT_ANONYMOUS", 1)
+    settings = get_settings()
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    public_key = private_key.public_key()
+
+    class LocalJwksClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def get_signing_key_from_jwt(self, _token):
+            return type("SigningKey", (), {"algorithm_name": "ES256", "key": public_key})()
+
+    monkeypatch.setattr("rentra_api.main.PyJWKClient", LocalJwksClient)
+    expired_token = jwt.encode(
+        {
+            "sub": "expired-user",
+            "exp": int(time.time()) - 60,
+            "iss": settings.SUPABASE_URL.rstrip("/") + "/auth/v1",
+            "aud": "authenticated",
+        },
+        private_key,
+        algorithm="ES256",
+        headers={"kid": "local-test-key"},
+    )
+    with read_client() as client:
+        public = client.get("/listings", headers={"Authorization": f"Bearer {expired_token}"})
+        limited = client.get("/areas")
+    assert public.status_code == 200
+    assert limited.status_code == 429
+
+
+def test_authenticated_route_bad_token_still_401():
+    with read_client() as client:
+        response = client.get("/me", headers={"Authorization": "Bearer malformed"})
+    assert response.status_code == 401

@@ -35,7 +35,7 @@ Status: partially decided. Items marked "Open" need a decision.
 - Landlord items: My listings, Dashboard (shown to landlords)
 - Account
 
-Landlord listing states are draft, active, rented, sold_out, unavailable, and archived. Only active, unsuspended listings are public. Listing management is available to the owner through draft creation, versioned edits, and publish, status, archive, restore, and force-delete actions.
+Landlord listing states are draft, active, rented, sold_out, unavailable, and archived. Only active, unsuspended listings are public. Listing management is available to the owner through draft creation, versioned edits, and publish, status, archive, restore, and force-delete actions. When editing answers or numeric details, the client submits the full replacement map.
 
 Clearing WhatsApp in the profile requires confirmation. Active, non-suspended listings are archived as part of the clear; if an active suspended listing exists, the clear is blocked. Restoring a listing that was active, and reactivating, require WhatsApp.
 

@@ -42,7 +42,7 @@ Registry values are owner-managed and are not writable by landlords or `rentra_a
 - `suspended_at`, `suspended_by`, `suspended_reason`
 - `version`, `created_at`, `updated_at`
 
-There is no description, `area_id`, or `district_id` column. A listing is public only while active and not suspended. Owners can read their own listings at every status and can write only their own through the versioned owner listing routes; answer and numeric sets are registry-validated.
+There is no description field. Location matching uses the listing point and the tenant search point/radius. A listing is public only while active and not suspended. Owners can read their own listings at every status and can write only their own through the versioned owner listing routes; submitted answer and numeric maps replace the full sets, and answer option keys are registry option labels. Point input uses `lat`/`lng`.
 
 ### Listing children
 
@@ -62,7 +62,7 @@ Publicly visible listings' answers, numeric values, and photo metadata are reada
 - Partial `listings(archived_at)` where status is archived
 - Child-side indexes for foreign keys
 
-There are no `area_id` or `district_id` columns or indexes. Location matching uses the listing point and the tenant search point/radius. Real GiST usage is proven by the step 10 load test at 20k listings.
+Location matching uses the listing point and the tenant search point/radius. Real GiST usage is proven by the step 10 load test at 20k listings.
 
 ## Later tables
 

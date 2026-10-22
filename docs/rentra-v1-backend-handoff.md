@@ -114,7 +114,7 @@ Errors are JSON `{code, message}` with stable codes. Generic message outside, de
 | `POST /listings/{id}/connect`, `GET /me/connections` | user | see section 7 |
 | `GET /me/notifications`, `POST /me/notifications/{id}/read` | user | feeds the sidebar |
 | `POST /listings` (draft), `GET /me/listings`, `GET /me/listings/{id}` | user | max 20 drafts per user [ENG] |
-| `PATCH /listings/{id}`, `POST /listings/{id}/publish`, `POST /listings/{id}/status`, `POST /listings/{id}/archive`, `POST /listings/{id}/restore`, `DELETE /listings/{id}` | owner | `DELETE` is force delete, allowed only on archived listings |
+| `PATCH /listings/{id}`, `POST /listings/{id}/publish`, `POST /listings/{id}/status`, `POST /listings/{id}/archive`, `POST /listings/{id}/restore`, `DELETE /listings/{id}` | owner | `DELETE` is force delete, allowed only on archived listings. PATCH requires `version`; when `answers` or `numeric` is supplied, it replaces the full set, so clients must send the full map. Answer option keys are registry option labels. Point input uses `lat`/`lng`. |
 | `POST/DELETE /listings/{id}/photos`, reorder | owner | server-side upload only, see section 9 |
 | `POST /listings/{id}/report` | user | not own listing |
 | `GET /admin/reports`, `POST /admin/reports/{id}/resolve`, `POST /admin/listings/{id}/suspend`, `POST /admin/listings/{id}/unsuspend` | admin | audited |
@@ -173,17 +173,27 @@ Boosted listings, reports on profiles, push notifications, Idempotency-Key table
 
 ## 13. Build order
 
-1. `rentra_api` role, schema `app`, default privileges, RLS baseline, test harness on local Supabase.
-2. `profiles`, JWT verification, auth middleware, the deletion-requested check.
-3. Tenant current and search locations as a point plus radius, registry from section 16. Add a regression test proving `anon` and `authenticated` cannot execute `app.get_public_profile(uuid)`.
-4. Listings, lifecycle triggers, photos, version handling, numeric fields. Tighten `app.get_public_profile(p_id)` to return contact details only when that profile owns a publicly visible listing (`status = 'active' AND suspended_at IS NULL`), and test that profiles without one are excluded.
-4c. Owner listing routes: create drafts, owner reads, versioned PATCH with registry-validated answers and numeric values, and lifecycle calls through the existing database functions. Enforce the 20-draft cap and 20 writes/minute/user limit.
-5. Public reads, map with clustering, rate limits.
+1. **Done.** `rentra_api` role, schema `app`, default privileges, RLS baseline, test harness on local Supabase.
+2. **Done.** `profiles`, JWT verification, auth middleware, the deletion-requested check.
+3. **Done.** Tenant current and search locations as a point plus radius, registry from section 16, and regression test proving `anon` and `authenticated` cannot execute `app.get_public_profile(uuid)`.
+4a. **Done.** Listing schema, lifecycle triggers, version handling, and numeric fields. `app.get_public_profile(p_id)` returns contact details only when that profile owns a publicly visible listing (`status = 'active' AND suspended_at IS NULL`).
+4b. **Pending.** Photos: store width, height, and `needs_fill`; allowed aspect ratios are 4:3, 3:2, and 16:9. A non-allowed ratio keeps the original and is flagged; the frontend draws the black fill. Generate thumbnails with fit-and-pad. Implement photo upload routes.
+4c. **Done.** Owner listing routes: create drafts, owner reads, versioned PATCH with registry-validated answers and numeric values, and lifecycle calls through the existing database functions. Enforce the 20-draft cap and 20 writes/minute/user limit.
+5. **Done.** Public reads, map with clustering, and rate limits.
 6. Requirements and matching (perfect, strong, conflicts tiers).
 7. Connect, notifications sidebar.
 8. Saved, reports, admin suspend, audit tables.
 9. Jobs, outbox worker, account deletion.
-10. Observability, then a staging load test at 50k tenants and 20k listings with `EXPLAIN` checks. Targets: matches p95 300 ms, map p95 200 ms. [UNVERIFIED targets until measured]
+10. Observability, then a staging load test at 50k tenants and 20k listings with `EXPLAIN` checks. Prove real GiST index usage and log the DBSCAN clustering input cap risk. Targets: matches p95 300 ms, map p95 200 ms. [UNVERIFIED targets until measured]
+
+Every route in section 6 must have an owning build step.
+
+**Polish backlog (done)**
+
+- Prune empty keys from the in-process rate limiter.
+- Exempt `/health/ready` from the limiter.
+- Treat bad or expired tokens on public routes as anonymous.
+- Add `FOR SHARE` on the profile row in `publish_listing`, `set_listing_status`, and `restore_listing` via a new migration.
 
 ## 14. Tests (all against real Postgres)
 
@@ -250,13 +260,18 @@ Boosted listings, reports on profiles, push notifications, Idempotency-Key table
 - `test_owner_full_listing_lifecycle_and_public_phone`
 - `test_publish_error_names_missing_answers_numeric_and_whatsapp`
 - `test_patch_stale_version_and_valid_patch_bump`
-- `test_patch_rejects_protected_fields`
 - `test_patch_rejects_invalid_option_wrong_attribute_cardinality_and_rent_numeric`
 - `test_foreign_user_gets_not_found_on_all_owner_id_routes`
 - `test_suspended_listing_locked_for_owner_on_write_routes`
 - `test_draft_cap_twenty`
 - `test_write_rate_limit_returns_429`
 - `test_phone_never_appears_in_owner_route_error_or_logs`
+- `test_patch_rejects_protected_fields` (`field=owner_id`)
+- `test_patch_rejects_protected_fields` (`field=status`)
+- `test_patch_rejects_protected_fields` (`field=suspended_at`)
+- `test_patch_rejects_protected_fields` (`field=suspended_by`)
+- `test_patch_rejects_protected_fields` (`field=suspended_reason`)
+- `test_patch_rejects_protected_fields` (`field=created_at`)
 
 **Idempotency and jobs**
 
@@ -285,6 +300,7 @@ Boosted listings, reports on profiles, push notifications, Idempotency-Key table
 
 - No district or city seed. The map handles location browsing. Search area is a point with a radius. The parking-lot doc is also not written.
 - Real GiST index usage is proven by the step 10 staging load test at 20k listings; small local EXPLAIN fixtures verify partial index availability and predicates, not actual GiST selection.
+- Open question: pin-tap phone: listing page only (assumed, unconfirmed).
 - Cloudflare in front of the API, a privacy policy, and a consent line at publish ("your number and pin are public") are pre-launch items.
 - Nepal rental law: the AI-generated summary is unverified and needs a Nepali lawyer check before any terms or in-app wording. The Family and Bachelors options stay as registry rows so they can be removed before launch if the team decides. [PRODUCT]
 - Legal review of phone publication and legal-order access is deferred until after launch. [PRODUCT]

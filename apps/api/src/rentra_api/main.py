@@ -39,14 +39,28 @@ class InProcessReadLimiter:
     def __init__(self) -> None:
         self._events: dict[tuple[str, str], deque[float]] = defaultdict(deque)
         self._lock = threading.Lock()
+        self._last_sweep = 0.0
 
     def allow(self, key: tuple[str, str], limit: int, window: int) -> tuple[bool, int]:
         now = time.monotonic()
         with self._lock:
-            events = self._events[key]
             cutoff = now - window
-            while events and events[0] <= cutoff:
-                events.popleft()
+            if now - self._last_sweep >= 60:
+                for stored_key, stored_events in list(self._events.items()):
+                    while stored_events and stored_events[0] <= cutoff:
+                        stored_events.popleft()
+                    if not stored_events:
+                        del self._events[stored_key]
+                self._last_sweep = now
+            events = self._events.get(key)
+            if events is None:
+                events = self._events[key]
+            else:
+                while events and events[0] <= cutoff:
+                    events.popleft()
+                if not events:
+                    del self._events[key]
+                    events = self._events[key]
             if len(events) >= limit:
                 return False, max(1, math.ceil(window - (now - events[0])))
             events.append(now)
@@ -59,7 +73,7 @@ class InProcessReadLimiter:
 
 read_limiter = InProcessReadLimiter()
 write_limiter = InProcessReadLimiter()
-READ_LIMITED_PATHS = {"/health/ready", "/listings", "/areas", "/registry", "/map"}
+READ_LIMITED_PATHS = {"/listings", "/areas", "/registry", "/map"}
 
 
 def _request_ip(request: Request) -> str:
@@ -102,21 +116,12 @@ async def limit_public_reads(request: Request, call_next):
     settings = get_settings()
     user_id = None
     authorization = request.headers.get("authorization", "")
-    if authorization:
-        if not authorization.startswith("Bearer "):
-            return JSONResponse(
-                status_code=401,
-                content={"code": "unauthorized", "message": "Invalid or missing bearer token"},
-                headers={"WWW-Authenticate": "Bearer"},
-            )
+    if authorization and authorization.startswith("Bearer "):
         try:
             user_id = str(_verify_access_token(authorization[7:].strip())["sub"])
         except HTTPException:
-            return JSONResponse(
-                status_code=401,
-                content={"code": "unauthorized", "message": "Invalid or missing bearer token"},
-                headers={"WWW-Authenticate": "Bearer"},
-            )
+            # These middleware-limited reads are public; invalid credentials use the IP bucket.
+            user_id = None
 
     if is_write:
         # Authenticated dependencies return the usual 401 when no token is supplied.

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 
 import psycopg
 import pytest
@@ -561,3 +563,47 @@ def test_public_profile_and_visibility_follow_status_changes(
         assert api_conn.execute(
             "SELECT whatsapp FROM app.get_public_profile(%s)", (owner["id"],)
         ).fetchone() == ("+9779800002222",)
+
+
+def test_publish_blocks_while_whatsapp_clear_in_flight(
+    db_conn: psycopg.Connection, signed_in_user: dict
+):
+    ensure_profile(signed_in_user)
+    listing_id = insert_listing(db_conn, signed_in_user["id"])
+    db_conn.execute(
+        "UPDATE app.profiles SET whatsapp = '+9779800001111' WHERE id = %s",
+        (signed_in_user["id"],),
+    )
+    db_conn.commit()
+
+    with runtime_connection() as clear_conn:
+        clear_conn.execute("SELECT set_config('app.user_id', %s, true)", (signed_in_user["id"],))
+        clear_conn.execute("SELECT app.clear_my_whatsapp(true)")
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            started = Event()
+
+            def publish_after_clear_lock():
+                with runtime_connection() as publish_conn:
+                    publish_conn.execute(
+                        "SELECT set_config('app.user_id', %s, true)", (signed_in_user["id"],)
+                    )
+                    started.set()
+                    try:
+                        publish_conn.execute("SELECT app.publish_listing(%s)", (listing_id,))
+                    except psycopg.errors.RaiseException as exc:
+                        return exc.diag.message_primary, exc.diag.message_detail
+                    return "PUBLISHED", None
+
+            future = pool.submit(publish_after_clear_lock)
+            assert started.wait(timeout=5)
+            try:
+                future.result(timeout=0.2)
+            except TimeoutError:
+                pass
+            else:
+                pytest.fail("publish did not wait for the in-flight WhatsApp clear")
+            clear_conn.commit()
+            primary, detail = future.result(timeout=10)
+
+    assert primary == "LISTING_PUBLISH_INCOMPLETE"
+    assert "whatsapp" in (detail or "").split(",")

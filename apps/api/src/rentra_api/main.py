@@ -6,7 +6,8 @@ import json
 import math
 import threading
 import time
-from typing import Annotated, Any, AsyncGenerator
+from datetime import datetime, timezone
+from typing import Annotated, Any, AsyncGenerator, Literal
 from urllib.parse import urljoin
 import re
 from decimal import Decimal
@@ -105,10 +106,14 @@ def _request_ip(request: Request) -> str:
 async def limit_public_reads(request: Request, call_next):
     path = request.url.path
     is_write = request.method in {"POST", "PATCH", "DELETE"} and (
-        path == "/listings" or path.startswith("/listings/")
+        path == "/listings" or (path.startswith("/listings/") and not path.endswith("/connect"))
     )
     is_read = request.method == "GET" and (
-        path in READ_LIMITED_PATHS or path.startswith("/listings/")
+        path in READ_LIMITED_PATHS
+        or path.startswith("/listings/")
+        or path == "/me/connections"
+        or path.startswith("/me/connections/profile/")
+        or path == "/me/notifications"
     )
     if not (is_write or is_read):
         return await call_next(request)
@@ -400,6 +405,67 @@ class ListingStatusInput(BaseModel):
         return value
 
 
+class StrictResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class ConnectResponse(StrictResponse):
+    wa_link: str | None
+
+
+class ConnectedProfileResponse(StrictResponse):
+    display_name: str | None
+    whatsapp: str | None
+    wa_link: str | None
+
+
+class ConnectedListingSummary(StrictResponse):
+    id: UUID
+    title: str
+    wa_link: str | None = None
+
+
+class ConnectionItemResponse(StrictResponse):
+    id: UUID
+    created_at: datetime
+    listing: ConnectedListingSummary
+
+
+class ConnectionsResponse(StrictResponse):
+    connections: list[ConnectionItemResponse]
+    next_cursor: str | None
+
+
+class NotificationUserResponse(StrictResponse):
+    id: UUID
+    display_name: str | None
+
+
+class NotificationListingResponse(StrictResponse):
+    id: UUID
+    title: str
+
+
+class NotificationItemResponse(StrictResponse):
+    id: UUID
+    kind: Literal["property_connected", "profile_connected"]
+    created_at: datetime
+    read_at: datetime | None
+    other_user: NotificationUserResponse | None
+    listing: NotificationListingResponse | None
+
+
+class NotificationsResponse(StrictResponse):
+    notifications: list[NotificationItemResponse]
+    unread_count: int
+    next_cursor: str | None
+
+
+class NotificationReadResponse(StrictResponse):
+    id: UUID
+    read_at: datetime
+
+
 @app.get("/me")
 def read_me(profile: Annotated[dict[str, Any], Depends(get_current_profile)]) -> dict[str, Any]:
     """Return the authenticated user's own profile, including their public contact number."""
@@ -675,6 +741,25 @@ def _decode_listing_cursor(cursor: str) -> tuple[str, UUID]:
         if not re.fullmatch(r"(?:0|[1-9][0-9]*)(?:\.[0-9]{1,2})?", rent_amount):
             raise ValueError
         return rent_amount, UUID(listing_id)
+    except (ValueError, TypeError, json.JSONDecodeError):
+        raise HTTPException(status_code=422, detail={"code": "invalid_cursor", "message": "Invalid cursor"})
+
+
+def _encode_feed_cursor(created_at: datetime, item_id: Any) -> str:
+    raw = json.dumps([created_at.isoformat(), str(item_id)], separators=(",", ":")).encode()
+    return urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _decode_feed_cursor(cursor: str | None) -> tuple[datetime | None, UUID | None]:
+    if cursor is None:
+        return None, None
+    try:
+        raw = urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
+        created_at_raw, item_id_raw = json.loads(raw)
+        created_at = datetime.fromisoformat(created_at_raw)
+        if created_at.tzinfo is None:
+            raise ValueError
+        return created_at.astimezone(timezone.utc), UUID(item_id_raw)
     except (ValueError, TypeError, json.JSONDecodeError):
         raise HTTPException(status_code=422, detail={"code": "invalid_cursor", "message": "Invalid cursor"})
 
@@ -1057,6 +1142,208 @@ def restore_owner_listing(listing_ref: str, profile: Annotated[dict[str, Any], D
 def delete_owner_listing(listing_ref: str, profile: Annotated[dict[str, Any], Depends(get_current_profile)]) -> dict[str, Any]:
     paths = _call_listing_function("SELECT app.force_delete_listing(%s)", listing_ref, profile)
     return {"deleted": True, "storage_paths": paths}
+
+
+def _connect_error(exc: psycopg.Error) -> HTTPException:
+    code = getattr(exc.diag, "message_primary", None)
+    if code == "LISTING_NOT_FOUND":
+        return HTTPException(
+            status_code=404,
+            detail={"code": "LISTING_NOT_FOUND", "message": "Listing not found"},
+        )
+    if code == "CONNECT_OWN_LISTING":
+        return HTTPException(
+            status_code=400,
+            detail={"code": "CONNECT_OWN_LISTING", "message": "Cannot connect to your own listing"},
+        )
+    if code == "CONNECT_LIMIT":
+        retry_after = getattr(exc.diag, "message_detail", None) or "1"
+        return HTTPException(
+            status_code=429,
+            detail={"code": "CONNECT_LIMIT", "message": "Connection limit reached"},
+            headers={"Retry-After": retry_after},
+        )
+    return HTTPException(
+        status_code=503,
+        detail={"code": "CONNECTION_STORAGE_UNAVAILABLE", "message": "Connections unavailable"},
+    )
+
+
+def _profile_not_found() -> HTTPException:
+    return HTTPException(
+        status_code=404,
+        detail={"code": "PROFILE_NOT_FOUND", "message": "Profile not found"},
+    )
+
+
+@app.post("/listings/{listing_ref}/connect", response_model=ConnectResponse)
+def connect_to_listing(
+    listing_ref: str,
+    profile: Annotated[dict[str, Any], Depends(get_current_profile)],
+) -> dict[str, Any]:
+    try:
+        listing_id = UUID(listing_ref)
+    except ValueError:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "LISTING_NOT_FOUND", "message": "Listing not found"},
+        )
+    try:
+        with get_db_connection() as conn:
+            conn.execute("SELECT set_config('app.user_id', %s, true)", (str(profile["id"]),))
+            wa_link = conn.execute(
+                "SELECT app.connect_listing(%s)", (listing_id,)
+            ).fetchone()[0]
+    except psycopg.Error as exc:
+        raise _connect_error(exc) from exc
+    return {"wa_link": wa_link}
+
+
+@app.get("/me/connections/profile/{user_id}", response_model=ConnectedProfileResponse)
+def read_connected_profile(
+    user_id: UUID,
+    profile: Annotated[dict[str, Any], Depends(get_current_profile)],
+) -> dict[str, Any]:
+    try:
+        with get_db_connection() as conn:
+            conn.execute("SELECT set_config('app.user_id', %s, true)", (str(profile["id"]),))
+            row = conn.execute(
+                "SELECT display_name, whatsapp, wa_link FROM app.get_connected_profile(%s)",
+                (str(user_id),),
+            ).fetchone()
+    except psycopg.Error as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "PROFILE_STORAGE_UNAVAILABLE", "message": "Profile unavailable"},
+        ) from exc
+    if row is None:
+        raise _profile_not_found()
+    return {"display_name": row[0], "whatsapp": row[1], "wa_link": row[2]}
+
+
+@app.get(
+    "/me/connections",
+    response_model=ConnectionsResponse,
+    response_model_exclude_unset=True,
+)
+def read_my_connections(
+    profile: Annotated[dict[str, Any], Depends(get_current_profile)],
+    page_size: int = Query(default=20, ge=1, le=50),
+    cursor: str | None = None,
+) -> dict[str, Any]:
+    before_created_at, before_id = _decode_feed_cursor(cursor)
+    try:
+        with get_db_connection() as conn:
+            conn.execute("SELECT set_config('app.user_id', %s, true)", (str(profile["id"]),))
+            rows = conn.execute(
+                """SELECT * FROM app.get_my_connections(
+                       %s::timestamptz, %s::uuid, %s::integer
+                   )""",
+                (before_created_at, before_id, page_size + 1),
+            ).fetchall()
+    except psycopg.Error as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "CONNECTION_STORAGE_UNAVAILABLE", "message": "Connections unavailable"},
+        ) from exc
+
+    has_more = len(rows) > page_size
+    visible_rows = rows[:page_size]
+    connections = []
+    for row in visible_rows:
+        listing = {"id": row[2], "title": row[3]}
+        if row[4]:
+            listing["wa_link"] = row[5]
+        connections.append({"id": row[0], "created_at": row[1], "listing": listing})
+    next_cursor = None
+    if has_more and visible_rows:
+        next_cursor = _encode_feed_cursor(visible_rows[-1][1], visible_rows[-1][0])
+    return {"connections": connections, "next_cursor": next_cursor}
+
+
+@app.get("/me/notifications", response_model=NotificationsResponse)
+def read_my_notifications(
+    profile: Annotated[dict[str, Any], Depends(get_current_profile)],
+    page_size: int = Query(default=20, ge=1, le=50),
+    cursor: str | None = None,
+) -> dict[str, Any]:
+    before_created_at, before_id = _decode_feed_cursor(cursor)
+    try:
+        with get_db_connection() as conn:
+            conn.execute("SELECT set_config('app.user_id', %s, true)", (str(profile["id"]),))
+            unread_count = conn.execute(
+                "SELECT count(*) FROM app.notifications WHERE user_id = %s AND read_at IS NULL",
+                (str(profile["id"]),),
+            ).fetchone()[0]
+            rows = conn.execute(
+                """SELECT * FROM app.get_my_notifications(
+                       %s::timestamptz, %s::uuid, %s::integer
+                   )""",
+                (before_created_at, before_id, page_size + 1),
+            ).fetchall()
+    except psycopg.Error as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "NOTIFICATION_STORAGE_UNAVAILABLE", "message": "Notifications unavailable"},
+        ) from exc
+
+    has_more = len(rows) > page_size
+    visible_rows = rows[:page_size]
+    notifications = []
+    for row in visible_rows:
+        other_user = None
+        if row[4] is not None:
+            other_user = {"id": row[4], "display_name": row[5]}
+        listing = None
+        if row[6] is not None:
+            listing = {"id": row[6], "title": row[7]}
+        notifications.append({
+            "id": row[0],
+            "kind": row[1],
+            "created_at": row[2],
+            "read_at": row[3],
+            "other_user": other_user,
+            "listing": listing,
+        })
+    next_cursor = None
+    if has_more and visible_rows:
+        next_cursor = _encode_feed_cursor(visible_rows[-1][2], visible_rows[-1][0])
+    return {
+        "notifications": notifications,
+        "unread_count": unread_count,
+        "next_cursor": next_cursor,
+    }
+
+
+@app.post(
+    "/me/notifications/{notification_id}/read",
+    response_model=NotificationReadResponse,
+)
+def mark_notification_read(
+    notification_id: UUID,
+    profile: Annotated[dict[str, Any], Depends(get_current_profile)],
+) -> dict[str, Any]:
+    try:
+        with get_db_connection() as conn:
+            conn.execute("SELECT set_config('app.user_id', %s, true)", (str(profile["id"]),))
+            row = conn.execute(
+                """UPDATE app.notifications
+                   SET read_at = COALESCE(read_at, now())
+                   WHERE id = %s AND user_id = %s
+                   RETURNING id, read_at""",
+                (str(notification_id), str(profile["id"])),
+            ).fetchone()
+    except psycopg.Error as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "NOTIFICATION_STORAGE_UNAVAILABLE", "message": "Notifications unavailable"},
+        ) from exc
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "NOTIFICATION_NOT_FOUND", "message": "Notification not found"},
+        )
+    return {"id": row[0], "read_at": row[1]}
 
 
 @app.get("/listings")

@@ -112,6 +112,7 @@ Errors are JSON `{code, message}` with stable codes. Generic message outside, de
 | `PUT /me/requirements`, `GET /matches` | user |  |
 | `POST/DELETE /listings/{id}/save`, `GET /me/saved` | user |  |
 | `POST /listings/{id}/connect`, `GET /me/connections` | user | see section 7 |
+| `GET /me/connections/profile/{user_id}` | user | connection-scoped profile; see section 7 |
 | `GET /me/notifications`, `POST /me/notifications/{id}/read` | user | feeds the sidebar |
 | `POST /listings` (draft), `GET /me/listings`, `GET /me/listings/{id}` | user | max 20 drafts per user [ENG] |
 | `PATCH /listings/{id}`, `POST /listings/{id}/publish`, `POST /listings/{id}/status`, `POST /listings/{id}/archive`, `POST /listings/{id}/restore`, `DELETE /listings/{id}` | owner | `DELETE` is force delete, allowed only on archived listings. PATCH requires `version`; when `answers` or `numeric` is supplied, it replaces the full set, so clients must send the full map. Answer option keys are registry option labels. Point input uses `lat`/`lng`. |
@@ -124,10 +125,14 @@ Frontend URLs use `/rent/{slug}-{id}`. The API resolves by the trailing id. No s
 ## 7. Connect and notifications
 
 - Allowed for a signed-in user on a public-visible listing they do not own. [PRODUCT]
+- A tenant's WhatsApp number is optional when connecting. If saved, it is shared with the owner of a listing they connected to; without a number, the owner cannot text them. [PRODUCT]
+- The owner of a listing a user connected to can open that connector's name and WhatsApp number, if saved. The connector can open the landlord's profile only while the owner has a connected listing that is public-visible. Other cases return the same 404 as a missing profile.
 - One transaction: insert into `connections` with `ON CONFLICT DO NOTHING`. If a row was inserted, insert two notifications in the same transaction: one to the connector (property connected) and one to the owner (profile connected). Both sides see the connection. [PRODUCT]
 - Repeat calls return the same result and create no new notification.
 - Cap: 50 new connections per rolling 24 hours per user, counted from `connections.created_at`. Over the cap returns 429 `CONNECT_LIMIT`. The cap is soft under concurrency, accepted.
-- Returns the WhatsApp link, built server-side as `https://wa.me/<digits>`.
+- Own-listing attempts return 400 `CONNECT_OWN_LISTING`. Returns the owner's WhatsApp link, built server-side as `https://wa.me/<digits>`.
+- Connection profile reads the current profile number at request time; clearing it removes it from the connector profile. No number yields `whatsapp:null` and `wa_link:null`.
+- Notification items contain `id`, `kind`, `created_at`, `read_at`, `other_user:{id, display_name}` or null, and `listing:{id, title}` or null. User and listing references are joined at read time; account deletion cascades a user's notifications, while deleting the other user or listing sets that item field to null. Notifications never contain phone numbers.
 - Notifications are an in-app sidebar only. No push. Tenants are notified when a listing they saved changes. Transactional email goes through Resend. [PRODUCT]
 
 ## 8. Jobs, outbox, deletion
@@ -142,6 +147,7 @@ Frontend URLs use `/rent/{slug}-{id}`. The API resolves by the trailing id. No s
 ## 9. Security rules
 
 - Phone and point are public by product decision. [PRODUCT] The phone appears wherever a listing appears: list, detail, and matches. Phone numbers must never appear in logs, error bodies, or stack traces, since that is about leaking data through the server, not about visibility.
+- A tenant's saved phone is visible to the owner of a listing they connected to. [PRODUCT]
 - Mass assignment: `PATCH` uses an explicit field allowlist. Never writable by the client: `owner_id`, `status`, `suspended_*`, `version` (it is only compared), `created_at`.
 - Validation at the boundary with strict Pydantic models. Reject NaN and out-of-range coordinates, oversize or malformed bodies, and unknown fields.
 - Photo upload goes through the API only. Max 5 MB, jpeg/png/webp, magic-byte check, re-encode with Pillow to strip EXIF, uuid object names, bucket write only through the service key held by the API. [ENG]
@@ -181,7 +187,7 @@ Boosted listings, reports on profiles, push notifications, Idempotency-Key table
 4c. **Done.** Owner listing routes: create drafts, owner reads, versioned PATCH with registry-validated answers and numeric values, and lifecycle calls through the existing database functions. Enforce the 20-draft cap and 20 writes/minute/user limit.
 5. **Done.** Public reads, map with clustering, and rate limits.
 6. Requirements and matching (perfect, strong, conflicts tiers).
-7. Connect, notifications sidebar.
+7. **Done.** Connect, notifications sidebar, and connection-scoped profile access.
 8. Saved, reports, admin suspend, audit tables.
 9. Jobs, outbox worker, account deletion.
 10. Observability, then a staging load test at 50k tenants and 20k listings with `EXPLAIN` checks. Prove real GiST index usage and log the DBSCAN clustering input cap risk. Targets: matches p95 300 ms, map p95 200 ms. [UNVERIFIED targets until measured]
@@ -207,6 +213,7 @@ Every route in section 6 must have an owning build step.
 - `test_patch_cannot_set_owner_status_suspended_version`
 - `test_connect_own_listing_rejected`
 - `test_connect_cap_rolling_24h`
+- `test_connect_at_cap_repeat_still_succeeds`
 - `test_suspended_listing_hidden_from_public`
 - `test_suspended_listing_locked_for_owner`
 - `test_jobs_skip_suspended_listings`
@@ -277,6 +284,22 @@ Every route in section 6 must have an owning build step.
 
 - `test_connect_twice_one_row_one_notification`
 - `test_connect_creates_both_notifications_atomically`
+- `test_connect_non_public_listing_404`
+- `test_connect_requires_auth`
+- `test_connect_returns_wa_link_digits_only`
+- `test_connect_concurrent_double_call_one_row`
+- `test_notifications_list_own_only_and_keyset`
+- `test_notification_read_idempotent`
+- `test_notification_read_foreign_id_404`
+- `test_connections_list_own_only_and_wa_link_only_if_public`
+- `test_connection_and_notifications_cascade_on_account_delete`
+- `test_connect_without_tenant_whatsapp_succeeds`
+- `test_landlord_can_open_connector_profile`
+- `test_connector_profile_null_whatsapp_when_tenant_has_none`
+- `test_connector_whatsapp_cleared_later_disappears`
+- `test_connector_profile_foreign_user_404`
+- `test_tenant_can_open_landlord_profile_only_while_listing_public`
+- `test_connector_phone_never_in_logs_or_errors`
 - `test_each_job_twice_is_noop`
 - `test_job_concurrent_run_second_exits`
 - `test_purge_storage_failure_retried_by_outbox`
@@ -302,6 +325,7 @@ Every route in section 6 must have an owning build step.
 - Real GiST index usage is proven by the step 10 staging load test at 20k listings; small local EXPLAIN fixtures verify partial index availability and predicates, not actual GiST selection.
 - Open question: pin-tap phone: listing page only (assumed, unconfirmed).
 - Cloudflare in front of the API, a privacy policy, and a consent line at publish ("your number and pin are public") are pre-launch items.
+- A consent line at connect ("if you saved a number, it is shared with this landlord") is a pre-launch item. Chat is a future feature.
 - Nepal rental law: the AI-generated summary is unverified and needs a Nepali lawyer check before any terms or in-app wording. The Family and Bachelors options stay as registry rows so they can be removed before launch if the team decides. [PRODUCT]
 - Legal review of phone publication and legal-order access is deferred until after launch. [PRODUCT]
 

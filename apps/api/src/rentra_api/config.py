@@ -1,5 +1,6 @@
 from functools import lru_cache
 from typing import Optional
+from PIL import ImageColor
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -45,6 +46,7 @@ class Settings(BaseSettings):
     READ_RATE_LIMIT_ANONYMOUS: int = Field(default=60, ge=1)
     READ_RATE_LIMIT_USER: int = Field(default=120, ge=1)
     WRITE_RATE_LIMIT_USER: int = Field(default=20, ge=1)
+    PHOTO_BAR_COLOR: str = "black"
     LISTINGS_PAGE_MAX: int = Field(default=50, ge=1, le=50)
     MAP_RESPONSE_CAP: int = Field(default=500, ge=1)
     MAP_CLUSTER_ZOOM: float = Field(default=10.0, ge=0, le=22)
@@ -61,6 +63,18 @@ class Settings(BaseSettings):
         if not v or not v.strip():
             raise ValueError("Environment variable must not be empty")
         return v.strip()
+
+    @field_validator("PHOTO_BAR_COLOR")
+    @classmethod
+    def validate_photo_bar_color(cls, value: str) -> str:
+        if not value or not value.strip():
+            raise ValueError("PHOTO_BAR_COLOR must not be empty")
+        value = value.strip()
+        try:
+            ImageColor.getrgb(value)
+        except ValueError as exc:
+            raise ValueError("PHOTO_BAR_COLOR must be a valid Pillow color") from exc
+        return value
 
     def __repr__(self) -> str:
         return (

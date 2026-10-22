@@ -94,15 +94,23 @@ def test_listing_photo_position_is_limited_to_one_through_ten(
     ensure_profile(signed_in_user)
     listing_id = insert_listing(db_conn, signed_in_user["id"])
     for position in range(1, 11):
+        storage_path = f"{uuid.uuid4()}.jpg"
+        thumb_path = f"{uuid.uuid4()}-thumb.jpg"
         db_conn.execute(
-            "INSERT INTO app.listing_photos (listing_id, storage_path, position) VALUES (%s, %s, %s)",
-            (listing_id, f"{uuid.uuid4()}.jpg", position),
+            """INSERT INTO app.listing_photos
+                   (listing_id, storage_path, thumb_path, width, height, position)
+               VALUES (%s, %s, %s, 100, 100, %s)""",
+            (listing_id, storage_path, thumb_path, position),
         )
-    with pytest.raises(psycopg.errors.CheckViolation):
+    overflow_thumb = f"{uuid.uuid4()}-thumb.jpg"
+    with pytest.raises(psycopg.errors.CheckViolation) as exc_info:
         db_conn.execute(
-            "INSERT INTO app.listing_photos (listing_id, storage_path, position) VALUES (%s, 'overflow.jpg', 11)",
-            (listing_id,),
+            """INSERT INTO app.listing_photos
+                   (listing_id, storage_path, thumb_path, width, height, position)
+               VALUES (%s, 'overflow.jpg', %s, 100, 100, 11)""",
+            (listing_id, overflow_thumb),
         )
+    assert exc_info.value.diag.constraint_name == "listing_photos_position_check"
 
 
 def test_listing_photo_positions_are_unique_per_listing(
@@ -111,14 +119,22 @@ def test_listing_photo_positions_are_unique_per_listing(
     ensure_profile(signed_in_user)
     listing_id = insert_listing(db_conn, signed_in_user["id"])
     db_conn.execute(
-        "INSERT INTO app.listing_photos (listing_id, storage_path, position) VALUES (%s, 'one.jpg', 1)",
+        """INSERT INTO app.listing_photos
+               (listing_id, storage_path, thumb_path, width, height, position)
+           VALUES (%s, 'one.jpg', 'one-thumb.jpg', 100, 100, 1)""",
         (listing_id,),
     )
-    with pytest.raises(psycopg.errors.UniqueViolation):
-        db_conn.execute(
-            "INSERT INTO app.listing_photos (listing_id, storage_path, position) VALUES (%s, 'duplicate.jpg', 1)",
-            (listing_id,),
-        )
+    db_conn.commit()
+    with pytest.raises(psycopg.errors.UniqueViolation) as exc_info:
+        with db_conn.transaction():
+            db_conn.execute(
+                """INSERT INTO app.listing_photos
+                       (listing_id, storage_path, thumb_path, width, height, position)
+                   VALUES (%s, 'duplicate.jpg', 'duplicate-thumb.jpg', 100, 100, 1)""",
+                (listing_id,),
+            )
+            db_conn.execute("SET CONSTRAINTS app.listing_photos_listing_position_key IMMEDIATE")
+    assert exc_info.value.diag.constraint_name == "listing_photos_listing_position_key"
 
 
 def test_listing_answer_option_must_belong_to_its_attribute(
@@ -237,7 +253,9 @@ def test_child_insert_update_delete_bumps_listing_version(
     else:
         photo_id = str(uuid.uuid4())
         child_key = (listing_id, photo_id)
-        insert = "INSERT INTO app.listing_photos (listing_id, id, storage_path, position) VALUES (%s, %s, 'one.jpg', 1)"
+        insert = """INSERT INTO app.listing_photos
+                     (listing_id, id, storage_path, thumb_path, width, height, position)
+                     VALUES (%s, %s, 'one.jpg', 'one-thumb.jpg', 100, 100, 1)"""
         update = "UPDATE app.listing_photos SET storage_path = 'changed.jpg' WHERE listing_id = %s AND id = %s"
         update_args = child_key
         delete = "DELETE FROM app.listing_photos WHERE listing_id = %s AND id = %s"
@@ -276,7 +294,9 @@ def test_deleting_listing_cascades_to_answers_numeric_and_photos(
         (listing_id,),
     )
     db_conn.execute(
-        "INSERT INTO app.listing_photos (listing_id, storage_path, position) VALUES (%s, 'cascade.jpg', 1)",
+        """INSERT INTO app.listing_photos
+               (listing_id, storage_path, thumb_path, width, height, position)
+           VALUES (%s, 'cascade.jpg', 'cascade-thumb.jpg', 100, 100, 1)""",
         (listing_id,),
     )
 
@@ -301,7 +321,9 @@ def test_direct_child_delete_still_bumps_listing_version(
     listing_id = insert_listing(db_conn, signed_in_user["id"])
     photo_id = str(uuid.uuid4())
     db_conn.execute(
-        "INSERT INTO app.listing_photos (listing_id, id, storage_path, position) VALUES (%s, %s, 'delete.jpg', 1)",
+        """INSERT INTO app.listing_photos
+               (listing_id, id, storage_path, thumb_path, width, height, position)
+           VALUES (%s, %s, 'delete.jpg', 'delete-thumb.jpg', 100, 100, 1)""",
         (listing_id, photo_id),
     )
     before = db_conn.execute(
@@ -408,7 +430,9 @@ def test_listing_rls_public_visibility_and_owner_isolation(
     public_id = insert_listing(db_conn, owner_b["id"], status="active")
     other_photo_id = str(uuid.uuid4())
     db_conn.execute(
-        "INSERT INTO app.listing_photos (listing_id, id, storage_path, position) VALUES (%s, %s, 'other.jpg', 1)",
+        """INSERT INTO app.listing_photos
+               (listing_id, id, storage_path, thumb_path, width, height, position)
+           VALUES (%s, %s, 'other.jpg', 'other-thumb.jpg', 100, 100, 1)""",
         (other_draft_id, other_photo_id),
     )
 
@@ -445,7 +469,9 @@ def test_listing_rls_public_visibility_and_owner_isolation(
 
         own_photo_id = str(uuid.uuid4())
         runtime_conn.execute(
-            "INSERT INTO app.listing_photos (listing_id, id, storage_path, position) VALUES (%s, %s, 'mine.jpg', 1)",
+            """INSERT INTO app.listing_photos
+                   (listing_id, id, storage_path, thumb_path, width, height, position)
+               VALUES (%s, %s, 'mine.jpg', 'mine-thumb.jpg', 100, 100, 1)""",
             (own_draft_id, own_photo_id),
         )
         assert runtime_conn.execute(
@@ -457,7 +483,9 @@ def test_listing_rls_public_visibility_and_owner_isolation(
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             with runtime_conn.transaction():
                 runtime_conn.execute(
-                    "INSERT INTO app.listing_photos (listing_id, id, storage_path, position) VALUES (%s, %s, 'foreign.jpg', 1)",
+                    """INSERT INTO app.listing_photos
+                           (listing_id, id, storage_path, thumb_path, width, height, position)
+                       VALUES (%s, %s, 'foreign.jpg', 'foreign-thumb.jpg', 100, 100, 1)""",
                     (other_draft_id, foreign_photo_id),
                 )
         runtime_conn.execute(

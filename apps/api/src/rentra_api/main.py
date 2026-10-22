@@ -3,23 +3,28 @@ from collections import defaultdict, deque
 from ipaddress import ip_address, ip_network
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 import json
+import logging
 import math
 import threading
 import time
 from datetime import datetime, timezone
+from io import BytesIO
 from typing import Annotated, Any, AsyncGenerator, Literal
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 import re
+import uuid
 from decimal import Decimal
 from uuid import UUID
 
 import jwt
+import httpx
 import psycopg
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from jwt import PyJWKClient
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from PIL import Image, ImageColor, ImageOps, UnidentifiedImageError
 
 from rentra_api.config import get_settings
 
@@ -32,6 +37,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 
 app = FastAPI(title="Rentra API", version="0.1.0", lifespan=lifespan)
+logger = logging.getLogger("rentra_api")
 
 
 class InProcessReadLimiter:
@@ -105,6 +111,25 @@ def _request_ip(request: Request) -> str:
 @app.middleware("http")
 async def limit_public_reads(request: Request, call_next):
     path = request.url.path
+    if request.method == "POST" and re.fullmatch(r"/listings/[^/]+/photos", path):
+        content_length = request.headers.get("content-length")
+        if content_length is None:
+            return JSONResponse(
+                status_code=411,
+                content={"code": "PHOTO_LENGTH_REQUIRED", "message": "Content-Length is required"},
+            )
+        try:
+            declared_length = int(content_length)
+        except ValueError:
+            return JSONResponse(
+                status_code=411,
+                content={"code": "PHOTO_LENGTH_REQUIRED", "message": "Content-Length is required"},
+            )
+        if declared_length > PHOTO_MAX_BYTES + 64 * 1024:
+            return JSONResponse(
+                status_code=413,
+                content={"code": "PHOTO_TOO_LARGE", "message": "Photo exceeds 5 MB"},
+            )
     is_write = request.method in {"POST", "PATCH", "DELETE"} and (
         path == "/listings" or (path.startswith("/listings/") and not path.endswith("/connect"))
     )
@@ -407,8 +432,39 @@ class ListingStatusInput(BaseModel):
         return value
 
 
+class PhotoReorderInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    photo_ids: list[UUID] = Field(min_length=1, max_length=10)
+
+    @field_validator("photo_ids")
+    @classmethod
+    def photo_ids_unique(cls, value: list[UUID]) -> list[UUID]:
+        if len(value) != len(set(value)):
+            raise ValueError("photo_ids must be unique")
+        return value
+
+
 class StrictResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class ListingPhotoResponse(StrictResponse):
+    id: UUID
+    position: int
+    width: int
+    height: int
+    original_url: str
+    thumb_url: str | None
+
+
+class PhotoDeleteResponse(StrictResponse):
+    deleted: bool
+    storage_deleted: bool
+
+
+class PhotoReorderResponse(StrictResponse):
+    photos: list[ListingPhotoResponse]
 
 
 class ConnectResponse(StrictResponse):
@@ -918,6 +974,190 @@ def _listing_db_error(exc: psycopg.Error) -> HTTPException:
     )
 
 
+PHOTO_MAX_BYTES = 5 * 1024 * 1024
+PHOTO_MAX_PIXELS = 25_000_000
+PHOTO_THUMB_WIDTH = 400
+PHOTO_THUMB_HEIGHT = 300
+PHOTO_BUCKET = "listing-photos"
+PHOTO_MIME_BY_FORMAT = {"JPEG": "image/jpeg", "PNG": "image/png", "WEBP": "image/webp"}
+PHOTO_NORMALIZE_SEMAPHORE = threading.BoundedSemaphore(2)
+
+
+def _photo_error(status_code: int, code: str, message: str) -> HTTPException:
+    return HTTPException(status_code=status_code, detail={"code": code, "message": message})
+
+
+def _photo_public_url(path: str) -> str:
+    settings = get_settings()
+    return (
+        f"{settings.SUPABASE_URL.rstrip('/')}/storage/v1/object/public/"
+        f"{PHOTO_BUCKET}/{quote(path, safe='')}"
+    )
+
+
+def _photo_json(row: tuple[Any, ...]) -> dict[str, Any]:
+    photo_id, position, width, height, storage_path, thumb_path = row
+    return {
+        "id": str(photo_id),
+        "position": position,
+        "width": width,
+        "height": height,
+        "original_url": _photo_public_url(storage_path),
+        "thumb_url": _photo_public_url(thumb_path) if thumb_path else None,
+    }
+
+
+def _listing_photos_json(conn: psycopg.Connection, listing_id: str) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """SELECT id, position, width, height, storage_path, thumb_path
+           FROM app.listing_photos WHERE listing_id = %s ORDER BY position""",
+        (listing_id,),
+    ).fetchall()
+    return [_photo_json(row) for row in rows]
+
+
+def _photo_magic_format(data: bytes) -> str | None:
+    if data.startswith(b"\xff\xd8\xff"):
+        return "JPEG"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "PNG"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "WEBP"
+    return None
+
+
+def _read_photo_upload(upload: UploadFile) -> bytes:
+    chunks: list[bytes] = []
+    size = 0
+    while True:
+        chunk = upload.file.read(min(64 * 1024, PHOTO_MAX_BYTES + 1 - size))
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > PHOTO_MAX_BYTES:
+            raise _photo_error(413, "PHOTO_TOO_LARGE", "Photo exceeds 5 MB")
+        chunks.append(chunk)
+    if not size:
+        raise _photo_error(415, "PHOTO_TYPE_INVALID", "Photo must be a JPEG, PNG, or WebP image")
+    return b"".join(chunks)
+
+
+def _normalize_photo_unlocked(data: bytes) -> tuple[bytes, bytes, int, int, str]:
+    detected_format = _photo_magic_format(data)
+    if detected_format is None:
+        raise _photo_error(415, "PHOTO_TYPE_INVALID", "Photo must be a JPEG, PNG, or WebP image")
+    try:
+        with Image.open(BytesIO(data)) as source:
+            if source.format not in ({"JPEG", "MPO"} if detected_format == "JPEG" else {detected_format}):
+                raise _photo_error(415, "PHOTO_TYPE_INVALID", "Photo content does not match its image type")
+            source.seek(0)
+            if source.width * source.height > PHOTO_MAX_PIXELS:
+                raise _photo_error(413, "PHOTO_TOO_LARGE", "Photo dimensions exceed the supported limit")
+            oriented = ImageOps.exif_transpose(source)
+            width, height = oriented.size
+            preserve_alpha = "A" in oriented.getbands() or "transparency" in oriented.info
+            normalized = oriented.convert("RGBA" if preserve_alpha else "RGB")
+            original_buffer = BytesIO()
+            save_options: dict[str, Any] = {}
+            if detected_format == "JPEG":
+                save_options = {"quality": 90, "optimize": True}
+            elif detected_format == "WEBP":
+                save_options = {"quality": 92, "method": 6}
+            else:
+                save_options = {"optimize": True}
+            normalized.save(original_buffer, format=detected_format, **save_options)
+
+            box_width = PHOTO_THUMB_WIDTH
+            box_height = PHOTO_THUMB_HEIGHT
+            settings = get_settings()
+            bar_color = ImageColor.getrgb(settings.PHOTO_BAR_COLOR)[:3]
+            scale = min(box_width / width, box_height / height)
+            fitted_size = (max(1, round(width * scale)), max(1, round(height * scale)))
+            fitted = normalized.resize(fitted_size, Image.Resampling.LANCZOS)
+            canvas = Image.new("RGB", (box_width, box_height), bar_color)
+            offset = ((box_width - fitted.width) // 2, (box_height - fitted.height) // 2)
+            if fitted.mode == "RGBA":
+                canvas.paste(fitted, offset, fitted.getchannel("A"))
+            else:
+                canvas.paste(fitted, offset)
+            thumb_buffer = BytesIO()
+            canvas.save(thumb_buffer, format="JPEG", quality=90, optimize=True)
+            return original_buffer.getvalue(), thumb_buffer.getvalue(), width, height, PHOTO_MIME_BY_FORMAT[detected_format]
+    except HTTPException:
+        raise
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning):
+        raise _photo_error(413, "PHOTO_TOO_LARGE", "Photo dimensions exceed the supported limit")
+    except (UnidentifiedImageError, OSError, ValueError, SyntaxError):
+        raise _photo_error(415, "PHOTO_TYPE_INVALID", "Photo must be a valid JPEG, PNG, or WebP image")
+
+
+def _normalize_photo(data: bytes) -> tuple[bytes, bytes, int, int, str]:
+    with PHOTO_NORMALIZE_SEMAPHORE:
+        return _normalize_photo_unlocked(data)
+
+
+def _storage_headers(content_type: str | None = None) -> dict[str, str]:
+    settings = get_settings()
+    headers = {
+        "apikey": settings.SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {settings.SUPABASE_SERVICE_ROLE_KEY}",
+    }
+    if content_type is not None:
+        headers["Content-Type"] = content_type
+        headers["x-upsert"] = "false"
+    return headers
+
+
+def _storage_object_url(path: str) -> str:
+    settings = get_settings()
+    return (
+        f"{settings.SUPABASE_URL.rstrip('/')}/storage/v1/object/"
+        f"{PHOTO_BUCKET}/{quote(path, safe='')}"
+    )
+
+
+def _storage_upload(path: str, data: bytes, content_type: str) -> None:
+    try:
+        response = httpx.post(
+            _storage_object_url(path), headers=_storage_headers(content_type), content=data, timeout=30
+        )
+        if not response.is_success:
+            raise RuntimeError("storage upload failed")
+    except Exception:
+        raise _photo_error(503, "PHOTO_STORAGE_UNAVAILABLE", "Photo storage unavailable") from None
+
+
+def _storage_delete(path: str) -> bool:
+    try:
+        response = httpx.delete(_storage_object_url(path), headers=_storage_headers(), timeout=15)
+        if response.is_success or response.status_code == 404:
+            return True
+    except Exception:
+        pass
+    logger.warning("photo_storage_delete_failed", extra={"event": "photo_storage_delete_failed"})
+    return False
+
+
+def _photo_listing_for_owner(
+    conn: psycopg.Connection, listing_id: str, owner_id: str, *, lock: bool = False
+) -> tuple[str, Any] | None:
+    suffix = " FOR UPDATE" if lock else ""
+    return conn.execute(
+        "SELECT status, suspended_at FROM app.listings WHERE id = %s AND owner_id = %s" + suffix,
+        (listing_id, owner_id),
+    ).fetchone()
+
+
+def _check_photo_listing_state(state: tuple[str, Any] | None) -> None:
+    if state is None:
+        raise _listing_not_found()
+    listing_status, suspended_at = state
+    if suspended_at is not None:
+        raise _photo_error(409, "LISTING_SUSPENDED", "Suspended listings cannot be changed")
+    if listing_status == "archived":
+        raise _photo_error(409, "LISTING_NOT_EDITABLE", "Archived listings cannot be changed")
+
+
 def _owned_listing_json(conn: psycopg.Connection, owner_id: str, listing_id: str) -> dict[str, Any]:
     row = conn.execute(
         """SELECT listing.id, listing.title, listing.rent_amount, listing.size_unit,
@@ -1093,7 +1333,166 @@ def read_my_listing(
     owner_id = str(profile["id"])
     with get_db_connection() as conn:
         conn.execute("SELECT set_config('app.user_id', %s, true)", (owner_id,))
-        return _owned_listing_json(conn, owner_id, listing_id)
+        listing = _owned_listing_json(conn, owner_id, listing_id)
+        listing["photos"] = _listing_photos_json(conn, listing_id)
+        return listing
+
+
+@app.post("/listings/{listing_ref}/photos", status_code=201, response_model=ListingPhotoResponse)
+def upload_listing_photo(
+    listing_ref: str,
+    profile: Annotated[dict[str, Any], Depends(get_current_profile)],
+    file: UploadFile = File(...),
+) -> dict[str, Any]:
+    try:
+        listing_id = str(UUID(listing_ref))
+    except ValueError:
+        raise _listing_not_found()
+    owner_id = str(profile["id"])
+    try:
+        with get_db_connection() as conn:
+            conn.execute("SELECT set_config('app.user_id', %s, true)", (owner_id,))
+            state = _photo_listing_for_owner(conn, listing_id, owner_id)
+            _check_photo_listing_state(state)
+    except HTTPException:
+        raise
+    except Exception:
+        raise _photo_error(503, "PHOTO_STORAGE_UNAVAILABLE", "Photo storage unavailable") from None
+
+    try:
+        raw_data = _read_photo_upload(file)
+    except HTTPException:
+        raise
+    except Exception:
+        raise _photo_error(503, "PHOTO_STORAGE_UNAVAILABLE", "Photo storage unavailable") from None
+    try:
+        original_data, thumb_data, width, height, content_type = _normalize_photo(raw_data)
+    except HTTPException:
+        raise
+    except Exception:
+        raise _photo_error(503, "PHOTO_STORAGE_UNAVAILABLE", "Photo storage unavailable") from None
+    storage_path = str(uuid.uuid4())
+    thumb_path = str(uuid.uuid4())
+    uploaded_paths: list[str] = []
+    try:
+        uploaded_paths.append(storage_path)
+        uploaded_paths.append(thumb_path)
+        _storage_upload(storage_path, original_data, content_type)
+        _storage_upload(thumb_path, thumb_data, "image/jpeg")
+        try:
+            with get_db_connection() as conn:
+                conn.execute("SELECT set_config('app.user_id', %s, true)", (owner_id,))
+                state = _photo_listing_for_owner(conn, listing_id, owner_id, lock=True)
+                _check_photo_listing_state(state)
+                position = conn.execute(
+                    """SELECT positions.candidate FROM generate_series(1, 10) AS positions(candidate)
+                       WHERE NOT EXISTS (
+                           SELECT 1 FROM app.listing_photos AS photo
+                           WHERE photo.listing_id = %s AND photo.position = positions.candidate
+                       ) ORDER BY positions.candidate LIMIT 1""",
+                    (listing_id,),
+                ).fetchone()
+                next_position = position[0] if position is not None else 11
+                row = conn.execute(
+                    """INSERT INTO app.listing_photos
+                           (listing_id, storage_path, thumb_path, position, width, height)
+                       VALUES (%s, %s, %s, %s, %s, %s)
+                       RETURNING id, position, width, height, storage_path, thumb_path""",
+                    (listing_id, storage_path, thumb_path, next_position, width, height),
+                ).fetchone()
+        except (psycopg.errors.UniqueViolation, psycopg.errors.CheckViolation) as exc:
+            if getattr(exc.diag, "constraint_name", None) in {
+                "listing_photos_listing_position_key", "listing_photos_position_check",
+            }:
+                raise _photo_error(409, "PHOTO_LIMIT", "A listing can have at most 10 photos") from None
+            raise
+        return _photo_json(row)
+    except HTTPException:
+        for uploaded_path in uploaded_paths:
+            _storage_delete(uploaded_path)
+        raise
+    except psycopg.Error:
+        for uploaded_path in uploaded_paths:
+            _storage_delete(uploaded_path)
+        raise _photo_error(503, "PHOTO_STORAGE_UNAVAILABLE", "Photo storage unavailable") from None
+    except Exception:
+        for uploaded_path in uploaded_paths:
+            _storage_delete(uploaded_path)
+        raise _photo_error(503, "PHOTO_STORAGE_UNAVAILABLE", "Photo storage unavailable") from None
+
+
+@app.delete("/listings/{listing_ref}/photos/{photo_id}", response_model=PhotoDeleteResponse)
+def delete_listing_photo(
+    listing_ref: str,
+    photo_id: UUID,
+    profile: Annotated[dict[str, Any], Depends(get_current_profile)],
+) -> dict[str, Any]:
+    try:
+        listing_id = str(UUID(listing_ref))
+    except ValueError:
+        raise _listing_not_found()
+    owner_id = str(profile["id"])
+    try:
+        with get_db_connection() as conn:
+            conn.execute("SELECT set_config('app.user_id', %s, true)", (owner_id,))
+            _check_photo_listing_state(_photo_listing_for_owner(conn, listing_id, owner_id, lock=True))
+            row = conn.execute(
+                """DELETE FROM app.listing_photos
+                   WHERE listing_id = %s AND id = %s
+                   RETURNING storage_path, thumb_path""",
+                (listing_id, photo_id),
+            ).fetchone()
+    except psycopg.Error:
+        raise _photo_error(503, "PHOTO_STORAGE_UNAVAILABLE", "Photo storage unavailable") from None
+    except HTTPException:
+        raise
+    except Exception:
+        raise _photo_error(503, "PHOTO_STORAGE_UNAVAILABLE", "Photo storage unavailable") from None
+    if row is None:
+        raise _photo_error(404, "PHOTO_NOT_FOUND", "Photo not found")
+    original_deleted = _storage_delete(row[0])
+    thumb_deleted = _storage_delete(row[1])
+    return {"deleted": True, "storage_deleted": original_deleted and thumb_deleted}
+
+
+@app.post("/listings/{listing_ref}/photos/reorder", response_model=PhotoReorderResponse)
+def reorder_listing_photos(
+    listing_ref: str,
+    body: PhotoReorderInput,
+    profile: Annotated[dict[str, Any], Depends(get_current_profile)],
+) -> dict[str, Any]:
+    try:
+        listing_id = str(UUID(listing_ref))
+    except ValueError:
+        raise _listing_not_found()
+    owner_id = str(profile["id"])
+    try:
+        with get_db_connection() as conn:
+            conn.execute("SELECT set_config('app.user_id', %s, true)", (owner_id,))
+            _check_photo_listing_state(_photo_listing_for_owner(conn, listing_id, owner_id, lock=True))
+            existing = conn.execute(
+                "SELECT id FROM app.listing_photos WHERE listing_id = %s ORDER BY position",
+                (listing_id,),
+            ).fetchall()
+            existing_ids = {row[0] for row in existing}
+            requested_ids = set(body.photo_ids)
+            if len(existing) != len(body.photo_ids) or existing_ids != requested_ids:
+                raise _photo_error(422, "PHOTO_ORDER_INVALID", "Photo order must include every listing photo once")
+            conn.execute(
+                """UPDATE app.listing_photos AS photo
+                   SET position = ordering.position::smallint
+                   FROM unnest(%s::uuid[]) WITH ORDINALITY AS ordering(id, position)
+                   WHERE photo.listing_id = %s AND photo.id = ordering.id""",
+                (body.photo_ids, listing_id),
+            )
+            photos = _listing_photos_json(conn, listing_id)
+    except HTTPException:
+        raise
+    except psycopg.Error:
+        raise _photo_error(503, "PHOTO_STORAGE_UNAVAILABLE", "Photo storage unavailable") from None
+    except Exception:
+        raise _photo_error(503, "PHOTO_STORAGE_UNAVAILABLE", "Photo storage unavailable") from None
+    return {"photos": photos}
 
 
 @app.patch("/listings/{listing_ref}")
@@ -1733,11 +2132,14 @@ def read_public_listing(listing_ref: str) -> dict[str, Any]:
                 PUBLIC_LISTING_SELECT + " AND listing.id = %s",
                 (str(listing_id),),
             ).fetchone()
+            photos = _listing_photos_json(conn, str(listing_id)) if row is not None else []
     except psycopg.Error as exc:
         raise HTTPException(status_code=503, detail={"code": "listing_storage_unavailable", "message": "Listing unavailable"}) from exc
     if row is None:
         raise HTTPException(status_code=404, detail={"code": "listing_not_found", "message": "Listing not found"})
-    return _listing_result(row)
+    listing = _listing_result(row)
+    listing["photos"] = photos
+    return listing
 
 
 @app.get("/areas")

@@ -46,7 +46,7 @@ All in schema `app`. Names are guidance, constraints are required.
 - `listings(id, owner_id FK profiles CASCADE, title, rent_amount numeric(12,2), point geography(Point,4326), status, archived_from_status, archived_at, status_changed_at, suspended_at, suspended_by, suspended_reason, version int, created_at, updated_at)`. Rent is stored here only, not in `listing_numeric`. CHECK: rent is positive; point is inside Nepal bounding box and not NaN. The bounding box also includes parts of India and Tibet, accepted for V1. Exact pin is public for every listing. [PRODUCT]
 - `listing_answers(listing_id, attribute_id, option_id)`, PK is all three. Yes/no attributes store the answer as an option row (Yes / No).
 - `listing_numeric(listing_id, field, value)`, for the numeric fields in section 16 other than `rent_amount`, which is a listing column.
-- `listing_photos(id, listing_id, storage_path, position smallint CHECK 1..10, UNIQUE(listing_id, position))`. Photo cap of 10 comes from this constraint, not app code.
+- `listing_photos(id, listing_id, storage_path, thumb_path, width int CHECK (width > 0), height int CHECK (height > 0), position smallint CHECK 1..10, UNIQUE(listing_id, position) DEFERRABLE INITIALLY DEFERRED)`. Photo cap of 10 comes from the position check constraint, not app code.
 - Requirements: `requirements(user_id, attribute_id, option_id, importance must|nice)`, plus numeric requirements `requirement_numeric(user_id, field, value, importance)` for rent max, bedrooms min, max people, and any numeric field in section 16. Each carries its own importance. Pick-one attributes: denormalize `pick_rule` onto the row with a composite FK to the registry, and `UNIQUE (user_id, attribute_id) WHERE importance='must' AND pick_rule='single'`.
 - `connections(id, user_id FK CASCADE, listing_id FK CASCADE, created_at, UNIQUE(user_id, listing_id))`. Indexes `(user_id, created_at)` and `(listing_id, created_at)`.
 - `notifications(id, user_id FK CASCADE, kind, listing_id, other_user_id, created_at, read_at)`. Typed columns, no jsonb. Powers the in-app notifications sidebar.
@@ -116,7 +116,9 @@ Errors are JSON `{code, message}` with stable codes. Generic message outside, de
 | `GET /me/notifications`, `POST /me/notifications/{id}/read` | user | feeds the sidebar |
 | `POST /listings` (draft), `GET /me/listings`, `GET /me/listings/{id}` | user | max 20 drafts per user [ENG] |
 | `PATCH /listings/{id}`, `POST /listings/{id}/publish`, `POST /listings/{id}/status`, `POST /listings/{id}/archive`, `POST /listings/{id}/restore`, `DELETE /listings/{id}` | owner | `DELETE` is force delete, allowed only on archived listings. PATCH requires `version`; when `answers` or `numeric` is supplied, it replaces the full set, so clients must send the full map. Answer option keys are registry option labels. Point input uses `lat`/`lng`. |
-| `POST/DELETE /listings/{id}/photos`, reorder | owner | server-side upload only, see section 9 |
+| `POST /listings/{id}/photos` | owner | server-side multipart upload only; suspended and archived listings are locked |
+| `DELETE /listings/{id}/photos/{photo_id}` | owner | database row is deleted before best-effort object deletion |
+| `POST /listings/{id}/photos/reorder` | owner | sends the complete ordered `photo_ids` list |
 | `POST /listings/{id}/report` | user | not own listing |
 | `GET /admin/reports`, `POST /admin/reports/{id}/resolve`, `POST /admin/listings/{id}/suspend`, `POST /admin/listings/{id}/unsuspend` | admin | resolve accepts an optional `{note}` (trimmed, up to 500 characters) for its audit reason; audited; non-admins receive the same 404 body as an unknown route |
 
@@ -151,7 +153,7 @@ Frontend URLs use `/rent/{slug}-{id}`. The API resolves by the trailing id. No s
 - A tenant's saved phone is visible to the owner of a listing they connected to. [PRODUCT]
 - Mass assignment: `PATCH` uses an explicit field allowlist. Never writable by the client: `owner_id`, `status`, `suspended_*`, `version` (it is only compared), `created_at`.
 - Validation at the boundary with strict Pydantic models. Reject NaN and out-of-range coordinates, oversize or malformed bodies, and unknown fields.
-- Photo upload goes through the API only. Max 5 MB, jpeg/png/webp, magic-byte check, re-encode with Pillow to strip EXIF, uuid object names, bucket write only through the service key held by the API. [ENG]
+- Photo upload goes through the API only. `Content-Length` is required (missing: 411) and requests declaring more than 5 MB plus 64 KB multipart overhead are rejected before the body is read; the API also enforces a 5 MB upload-stream limit. Jpeg/png/webp magic-byte checks ignore the client type and filename. Pillow enforces a decoded-pixel cap, applies EXIF orientation, then re-encodes originals without metadata and makes thumbnails by fitting the full image inside a fixed 400×300 (4:3) box, padding with the configured bar color as needed. Nothing is stretched or cropped to fill the frame. The original is never resized; the frontend letterboxes originals with CSS `object-fit: contain`. UUID object names are written through the API with the service key. The `listing-photos` bucket is assumed to exist and be public-read. [ENG]
 - CORS: allowlist of the frontend origin only. No `*`.
 - No stack traces in responses. No user-supplied URLs are ever fetched.
 - Secrets only in env, including `google_maps_key`. `.env.example` lists names only. Never logged, never committed.
@@ -184,7 +186,7 @@ Boosted listings, reports on profiles, push notifications, Idempotency-Key table
 2. **Done.** `profiles`, JWT verification, auth middleware, the deletion-requested check.
 3. **Done.** Tenant current and search locations as a point plus radius, registry from section 16, and regression test proving `anon` and `authenticated` cannot execute `app.get_public_profile(uuid)`.
 4a. **Done.** Listing schema, lifecycle triggers, version handling, and numeric fields. `app.get_public_profile(p_id)` returns contact details only when that profile owns a publicly visible listing (`status = 'active' AND suspended_at IS NULL`).
-4b. **Pending.** Photos: store width, height, and `needs_fill`; allowed aspect ratios are 4:3, 3:2, and 16:9. A non-allowed ratio keeps the original and is flagged; the frontend draws the black fill. Generate thumbnails with fit-and-pad. Implement photo upload routes.
+4b. **Done.** Photos: store width, height, and thumbnail path; validate jpeg/png/webp bytes and decoded pixel count, apply EXIF orientation, re-encode metadata-free originals, generate fixed-box fit-and-pad thumbnails, and implement upload, delete, and reorder routes.
 4c. **Done.** Owner listing routes: create drafts, owner reads, versioned PATCH with registry-validated answers and numeric values, and lifecycle calls through the existing database functions. Enforce the 20-draft cap and 20 writes/minute/user limit.
 5. **Done.** Public reads, map with clustering, and rate limits.
 6. Requirements and matching (perfect, strong, conflicts tiers).
@@ -258,7 +260,6 @@ Every route in section 6 must have an owning build step.
 - `test_force_delete_archived_is_immediate`
 - `test_force_delete_rejected_on_non_archived`
 - `test_abandoned_draft_purged`
-- `test_photo_cap_race_two_uploads`
 - `test_version_conflict_409_and_child_write_bumps_version`
 - `test_clear_without_confirm_is_rejected_and_changes_nothing`
 - `test_confirmed_clear_archives_only_active_non_suspended_listings`
@@ -285,6 +286,32 @@ Every route in section 6 must have an owning build step.
 - `test_patch_rejects_protected_fields` (`field=suspended_by`)
 - `test_patch_rejects_protected_fields` (`field=suspended_reason`)
 - `test_patch_rejects_protected_fields` (`field=created_at`)
+
+**Photos**
+
+- `test_photo_upload_stores_row_and_both_objects`
+- `test_thumbnail_fit_and_pad` (landscape and portrait)
+- `test_exif_stripped_and_orientation_applied`
+- `test_magic_byte_mismatch_rejected`
+- `test_oversize_rejected_and_nothing_stored`
+- `test_content_length_precheck`
+- `test_pixel_cap_rejected`
+- `test_mpo_jpeg_accepted`
+- `test_photo_cap_race_two_uploads`
+- `test_photo_cap_race_below_cap_both_succeed`
+- `test_photo_cap_ten_enforced_by_db`
+- `test_failed_upload_leaves_no_storage_objects`
+- `test_photo_write_bumps_listing_version`
+- `test_foreign_user_gets_404_on_photo_routes`
+- `test_delete_photo_of_other_listing_404`
+- `test_suspended_listing_locks_photo_writes`
+- `test_archived_listing_rejects_photo_writes`
+- `test_reorder_changes_positions_in_db`
+- `test_delete_removes_row_and_objects`
+- `test_storage_delete_failure_logged_without_path`
+- `test_photo_write_rate_limit_returns_429`
+- `test_public_detail_shows_photos`
+- `test_phone_never_in_logs_or_errors_for_photo_routes`
 
 **Idempotency and jobs**
 

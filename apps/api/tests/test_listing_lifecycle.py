@@ -260,9 +260,12 @@ def test_force_delete_archived_ok_and_non_archived_rejected(
     archived_id = insert_listing(db_conn, signed_in_user["id"], status="archived")
     photo_paths = ["owner-one/photo-a.jpg", "owner-one/photo-b.jpg"]
     for position, path in enumerate(photo_paths, start=1):
+        thumb_path = f"owner-one/thumb-{uuid.uuid4()}.jpg"
         db_conn.execute(
-            "INSERT INTO app.listing_photos (listing_id, storage_path, position) VALUES (%s, %s, %s)",
-            (archived_id, path, position),
+            """INSERT INTO app.listing_photos
+                   (listing_id, storage_path, thumb_path, width, height, position)
+               VALUES (%s, %s, %s, 100, 100, %s)""",
+            (archived_id, path, thumb_path, position),
         )
     db_conn.commit()
 

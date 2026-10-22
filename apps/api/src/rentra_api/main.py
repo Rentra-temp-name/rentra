@@ -114,6 +114,8 @@ async def limit_public_reads(request: Request, call_next):
         or path == "/me/connections"
         or path.startswith("/me/connections/profile/")
         or path == "/me/notifications"
+        or path == "/me/saved"
+        or path == "/admin/reports"
     )
     if not (is_write or is_read):
         return await call_next(request)
@@ -448,7 +450,7 @@ class NotificationListingResponse(StrictResponse):
 
 class NotificationItemResponse(StrictResponse):
     id: UUID
-    kind: Literal["property_connected", "profile_connected"]
+    kind: Literal["property_connected", "profile_connected", "saved_listing_changed"]
     created_at: datetime
     read_at: datetime | None
     other_user: NotificationUserResponse | None
@@ -464,6 +466,109 @@ class NotificationsResponse(StrictResponse):
 class NotificationReadResponse(StrictResponse):
     id: UUID
     read_at: datetime
+
+
+class SaveListingResponse(StrictResponse):
+    listing_id: UUID
+    saved: bool
+
+
+class SavedListingItemResponse(StrictResponse):
+    id: UUID
+    title: str
+    rent: Decimal
+    visible: bool
+    wa_link: str | None = None
+
+
+class SavedListingsResponse(StrictResponse):
+    saved: list[SavedListingItemResponse]
+    next_cursor: str | None
+
+
+class ReportInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(min_length=1, max_length=1000)
+
+    @field_validator("reason")
+    @classmethod
+    def nonblank_reason(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("reason must not be blank")
+        return value.strip()
+
+
+class ReportResultResponse(StrictResponse):
+    id: UUID
+    status: Literal["open", "resolved"]
+    created_at: datetime
+
+
+class AdminReportItemResponse(StrictResponse):
+    id: UUID
+    reporter_id: UUID | None
+    listing_id: UUID | None
+    snapshot_title: str
+    snapshot_whatsapp: str | None
+    reason: str
+    status: Literal["open", "resolved"]
+    resolved_by: UUID | None
+    resolved_at: datetime | None
+    created_at: datetime
+
+
+class AdminReportsResponse(StrictResponse):
+    reports: list[AdminReportItemResponse]
+    next_cursor: str | None
+
+
+class AdminResolveResponse(StrictResponse):
+    id: UUID
+    listing_id: UUID | None
+    status: Literal["open", "resolved"]
+    resolved_by: UUID | None
+    resolved_at: datetime | None
+    created_at: datetime
+
+
+class AdminResolveInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    note: str | None = Field(default=None, strict=True)
+
+    @field_validator("note")
+    @classmethod
+    def normalize_note(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if len(value) > 500:
+            raise ValueError("note must be at most 500 characters")
+        return value or None
+
+
+class AdminSuspendInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(min_length=1, max_length=500)
+
+    @field_validator("reason")
+    @classmethod
+    def nonblank_reason(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("reason must not be blank")
+        return value.strip()
+
+
+class AdminSuspendResponse(StrictResponse):
+    listing_id: UUID
+    suspended_at: datetime
+
+
+class AdminUnsuspendResponse(StrictResponse):
+    listing_id: UUID
+    suspended: bool
 
 
 @app.get("/me")
@@ -1313,6 +1418,241 @@ def read_my_notifications(
         "unread_count": unread_count,
         "next_cursor": next_cursor,
     }
+
+
+def _step8_db_error(exc: psycopg.Error) -> HTTPException:
+    code = getattr(exc.diag, "message_primary", None)
+    if code == "ADMIN_NOT_FOUND":
+        return HTTPException(status_code=404, detail="Not Found")
+    if code == "LISTING_NOT_FOUND":
+        return _listing_not_found()
+    if code == "SAVE_OWN_LISTING":
+        return HTTPException(
+            status_code=400,
+            detail={"code": code, "message": "Cannot save your own listing"},
+        )
+    if code == "REPORT_OWN_LISTING":
+        return HTTPException(
+            status_code=400,
+            detail={"code": code, "message": "Cannot report your own listing"},
+        )
+    if code == "REPORT_LIMIT":
+        retry_after = getattr(exc.diag, "message_detail", None) or "1"
+        return HTTPException(
+            status_code=429,
+            detail={"code": code, "message": "Report limit reached"},
+            headers={"Retry-After": retry_after},
+        )
+    if code == "REPORT_NOT_FOUND":
+        return HTTPException(
+            status_code=404,
+            detail={"code": code, "message": "Report not found"},
+        )
+    if code in {"LISTING_ALREADY_SUSPENDED", "LISTING_NOT_SUSPENDED"}:
+        return HTTPException(
+            status_code=409,
+            detail={"code": code, "message": "Listing suspension state conflict"},
+        )
+    if code in {"INVALID_REPORT_REASON", "INVALID_REPORT_STATUS", "ADMIN_REASON_REQUIRED", "INVALID_ADMIN_NOTE"}:
+        return HTTPException(
+            status_code=422,
+            detail={"code": code, "message": "Request data is invalid"},
+        )
+    return HTTPException(
+        status_code=503,
+        detail={"code": "STEP8_STORAGE_UNAVAILABLE", "message": "Request unavailable"},
+    )
+
+
+def _step8_listing_id(listing_ref: str) -> UUID:
+    try:
+        return UUID(listing_ref)
+    except ValueError:
+        raise _listing_not_found()
+
+
+@app.post("/listings/{listing_ref}/save", response_model=SaveListingResponse)
+def save_listing(
+    listing_ref: str,
+    profile: Annotated[dict[str, Any], Depends(get_current_profile)],
+) -> dict[str, Any]:
+    listing_id = _step8_listing_id(listing_ref)
+    try:
+        with get_db_connection() as conn:
+            conn.execute("SELECT set_config('app.user_id', %s, true)", (str(profile["id"]),))
+            conn.execute("SELECT app.save_listing(%s)", (listing_id,))
+    except psycopg.Error as exc:
+        raise _step8_db_error(exc) from exc
+    return {"listing_id": listing_id, "saved": True}
+
+
+@app.delete("/listings/{listing_ref}/save", response_model=SaveListingResponse)
+def unsave_listing(
+    listing_ref: str,
+    profile: Annotated[dict[str, Any], Depends(get_current_profile)],
+) -> dict[str, Any]:
+    listing_id = _step8_listing_id(listing_ref)
+    try:
+        with get_db_connection() as conn:
+            conn.execute("SELECT set_config('app.user_id', %s, true)", (str(profile["id"]),))
+            conn.execute("SELECT app.unsave_listing(%s)", (listing_id,))
+    except psycopg.Error as exc:
+        raise _step8_db_error(exc) from exc
+    return {"listing_id": listing_id, "saved": False}
+
+
+@app.get(
+    "/me/saved",
+    response_model=SavedListingsResponse,
+    response_model_exclude_unset=True,
+)
+def read_my_saved_listings(
+    profile: Annotated[dict[str, Any], Depends(get_current_profile)],
+    page_size: int = Query(default=20, ge=1, le=50),
+    cursor: str | None = None,
+) -> dict[str, Any]:
+    before_created_at, before_id = _decode_feed_cursor(cursor)
+    try:
+        with get_db_connection() as conn:
+            conn.execute("SELECT set_config('app.user_id', %s, true)", (str(profile["id"]),))
+            rows = conn.execute(
+                """SELECT * FROM app.get_my_saved(
+                       %s::timestamptz, %s::uuid, %s::integer
+                   )""",
+                (before_created_at, before_id, page_size + 1),
+            ).fetchall()
+    except psycopg.Error as exc:
+        raise _step8_db_error(exc) from exc
+
+    has_more = len(rows) > page_size
+    visible_rows = rows[:page_size]
+    saved = []
+    for row in visible_rows:
+        item = {
+            "id": row[0], "title": row[1], "rent": row[2], "visible": row[3],
+        }
+        if row[3]:
+            item["wa_link"] = row[4]
+        saved.append(item)
+    next_cursor = None
+    if has_more and visible_rows:
+        next_cursor = _encode_feed_cursor(visible_rows[-1][5], visible_rows[-1][0])
+    return {"saved": saved, "next_cursor": next_cursor}
+
+
+@app.post("/listings/{listing_ref}/report", response_model=ReportResultResponse)
+def report_listing(
+    listing_ref: str,
+    body: ReportInput,
+    profile: Annotated[dict[str, Any], Depends(get_current_profile)],
+) -> dict[str, Any]:
+    listing_id = _step8_listing_id(listing_ref)
+    try:
+        with get_db_connection() as conn:
+            conn.execute("SELECT set_config('app.user_id', %s, true)", (str(profile["id"]),))
+            row = conn.execute(
+                "SELECT * FROM app.report_listing(%s, %s)",
+                (listing_id, body.reason),
+            ).fetchone()
+    except psycopg.Error as exc:
+        raise _step8_db_error(exc) from exc
+    return {"id": row[0], "status": row[6], "created_at": row[9]}
+
+
+@app.get(
+    "/admin/reports",
+    response_model=AdminReportsResponse,
+    response_model_exclude_unset=True,
+)
+def read_admin_reports(
+    profile: Annotated[dict[str, Any], Depends(get_current_profile)],
+    report_status: Literal["open", "resolved"] = Query(default="open", alias="status"),
+    page_size: int = Query(default=20, ge=1, le=50),
+    cursor: str | None = None,
+) -> dict[str, Any]:
+    before_created_at, before_id = _decode_feed_cursor(cursor)
+    try:
+        with get_db_connection() as conn:
+            conn.execute("SELECT set_config('app.user_id', %s, true)", (str(profile["id"]),))
+            rows = conn.execute(
+                """SELECT * FROM app.admin_list_reports(
+                       %s, %s::timestamptz, %s::uuid, %s::integer
+                   )""",
+                (report_status, before_created_at, before_id, page_size + 1),
+            ).fetchall()
+    except psycopg.Error as exc:
+        raise _step8_db_error(exc) from exc
+
+    has_more = len(rows) > page_size
+    visible_rows = rows[:page_size]
+    reports = [
+        {
+            "id": row[0], "reporter_id": row[1], "listing_id": row[2],
+            "snapshot_title": row[3], "snapshot_whatsapp": row[4], "reason": row[5],
+            "status": row[6], "resolved_by": row[7], "resolved_at": row[8],
+            "created_at": row[9],
+        }
+        for row in visible_rows
+    ]
+    next_cursor = None
+    if has_more and visible_rows:
+        next_cursor = _encode_feed_cursor(visible_rows[-1][9], visible_rows[-1][0])
+    return {"reports": reports, "next_cursor": next_cursor}
+
+
+@app.post("/admin/reports/{report_id}/resolve", response_model=AdminResolveResponse)
+def resolve_admin_report(
+    report_id: UUID,
+    profile: Annotated[dict[str, Any], Depends(get_current_profile)],
+    body: AdminResolveInput | None = None,
+) -> dict[str, Any]:
+    try:
+        with get_db_connection() as conn:
+            conn.execute("SELECT set_config('app.user_id', %s, true)", (str(profile["id"]),))
+            row = conn.execute(
+                "SELECT * FROM app.admin_resolve_report(%s, %s)",
+                (report_id, body.note if body is not None else None),
+            ).fetchone()
+    except psycopg.Error as exc:
+        raise _step8_db_error(exc) from exc
+    return {
+        "id": row[0], "listing_id": row[2], "status": row[6],
+        "resolved_by": row[7], "resolved_at": row[8], "created_at": row[9],
+    }
+
+
+@app.post("/admin/listings/{listing_ref}/suspend", response_model=AdminSuspendResponse)
+def suspend_admin_listing(
+    listing_ref: str,
+    body: AdminSuspendInput,
+    profile: Annotated[dict[str, Any], Depends(get_current_profile)],
+) -> dict[str, Any]:
+    listing_id = _step8_listing_id(listing_ref)
+    try:
+        with get_db_connection() as conn:
+            conn.execute("SELECT set_config('app.user_id', %s, true)", (str(profile["id"]),))
+            row = conn.execute(
+                "SELECT * FROM app.admin_suspend_listing(%s, %s)",
+                (listing_id, body.reason),
+            ).fetchone()
+    except psycopg.Error as exc:
+        raise _step8_db_error(exc) from exc
+    return {"listing_id": row[0], "suspended_at": row[10]}
+
+
+@app.post("/admin/listings/{listing_ref}/unsuspend", response_model=AdminUnsuspendResponse)
+def unsuspend_admin_listing(
+    listing_ref: str,
+    profile: Annotated[dict[str, Any], Depends(get_current_profile)],
+) -> dict[str, Any]:
+    listing_id = _step8_listing_id(listing_ref)
+    try:
+        with get_db_connection() as conn:
+            conn.execute("SELECT set_config('app.user_id', %s, true)", (str(profile["id"]),))
+            conn.execute("SELECT app.admin_unsuspend_listing(%s)", (listing_id,))
+    except psycopg.Error as exc:
+        raise _step8_db_error(exc) from exc
+    return {"listing_id": listing_id, "suspended": False}
 
 
 @app.post(

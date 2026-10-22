@@ -118,7 +118,7 @@ Errors are JSON `{code, message}` with stable codes. Generic message outside, de
 | `PATCH /listings/{id}`, `POST /listings/{id}/publish`, `POST /listings/{id}/status`, `POST /listings/{id}/archive`, `POST /listings/{id}/restore`, `DELETE /listings/{id}` | owner | `DELETE` is force delete, allowed only on archived listings. PATCH requires `version`; when `answers` or `numeric` is supplied, it replaces the full set, so clients must send the full map. Answer option keys are registry option labels. Point input uses `lat`/`lng`. |
 | `POST/DELETE /listings/{id}/photos`, reorder | owner | server-side upload only, see section 9 |
 | `POST /listings/{id}/report` | user | not own listing |
-| `GET /admin/reports`, `POST /admin/reports/{id}/resolve`, `POST /admin/listings/{id}/suspend`, `POST /admin/listings/{id}/unsuspend` | admin | audited |
+| `GET /admin/reports`, `POST /admin/reports/{id}/resolve`, `POST /admin/listings/{id}/suspend`, `POST /admin/listings/{id}/unsuspend` | admin | resolve accepts an optional `{note}` (trimmed, up to 500 characters) for its audit reason; audited; non-admins receive the same 404 body as an unknown route |
 
 Frontend URLs use `/rent/{slug}-{id}`. The API resolves by the trailing id. No slug column. [ENG]
 
@@ -128,11 +128,12 @@ Frontend URLs use `/rent/{slug}-{id}`. The API resolves by the trailing id. No s
 - A tenant's WhatsApp number is optional when connecting. If saved, it is shared with the owner of a listing they connected to; without a number, the owner cannot text them. [PRODUCT]
 - The owner of a listing a user connected to can open that connector's name and WhatsApp number, if saved. The connector can open the landlord's profile only while the owner has a connected listing that is public-visible. Other cases return the same 404 as a missing profile.
 - One transaction: insert into `connections` with `ON CONFLICT DO NOTHING`. If a row was inserted, insert two notifications in the same transaction: one to the connector (property connected) and one to the owner (profile connected). Both sides see the connection. [PRODUCT]
-- Repeat calls return the same result and create no new notification.
+- Repeat calls on a listing that remains public-visible return the same result and create no new notification. If the listing is no longer public-visible, connect returns 404.
 - Cap: 50 new connections per rolling 24 hours per user, counted from `connections.created_at`. Over the cap returns 429 `CONNECT_LIMIT`. The cap is soft under concurrency, accepted.
 - Own-listing attempts return 400 `CONNECT_OWN_LISTING`. Returns the owner's WhatsApp link, built server-side as `https://wa.me/<digits>`.
 - Connection profile reads the current profile number at request time; clearing it removes it from the connector profile. No number yields `whatsapp:null` and `wa_link:null`.
 - Notification items contain `id`, `kind`, `created_at`, `read_at`, `other_user:{id, display_name}` or null, and `listing:{id, title}` or null. User and listing references are joined at read time; account deletion cascades a user's notifications, while deleting the other user or listing sets that item field to null. Notifications never contain phone numbers.
+- A single set-based trigger insert adds one `saved_listing_changed` notification for each saver, excluding the listing owner, when rent changes or public visibility flips (`status = 'active' AND suspended_at IS NULL`). Title-only and other non-relevant edits do not notify.
 - Notifications are an in-app sidebar only. No push. Tenants are notified when a listing they saved changes. Transactional email goes through Resend. [PRODUCT]
 
 ## 8. Jobs, outbox, deletion
@@ -159,9 +160,9 @@ Frontend URLs use `/rent/{slug}-{id}`. The API resolves by the trailing id. No s
 ## 10. Rate limits
 
 - Anonymous reads: 60 per minute per IP. Signed-in reads: 120 per minute per user. Page size max 50. Connect: 50 per rolling 24 hours per user. [PRODUCT: the numbers were proposed and accepted, change them in config.]
-- Writes [ENG]: uploads, draft creation, and reports get their own limits (20 per minute per user, reports 10 per day). Drafts capped at 20 per user.
+- Writes [ENG]: uploads, draft creation, save/unsave, and reports use the 20-per-minute-per-user write limiter. New reports also use a database-counted cap of 10 per user per rolling 24 hours, based on `reports.created_at`; repeats do not count. Drafts capped at 20 per user.
 - V1 runs one container with one worker, so an in-process limiter is correct. With N workers each keeps its own counter and the effective limit is N times higher. Move to Redis only when running more than one worker or container.
-- Never use Postgres counters for read limits (a DB write per anonymous read is a self-inflicted DoS). Only the connect cap uses the DB.
+- Never use Postgres counters for read limits (a DB write per anonymous read is a self-inflicted DoS). Connect and report caps use the DB.
 - Client IP: run uvicorn with proxy headers and trust forwarded headers only from the known proxy. Otherwise every user shares one IP or the header is spoofable.
 - Return 429 with `Retry-After`. All limits live in one settings file. Cloudflare edge limits are added before public launch and then take over the read limits.
 
@@ -188,7 +189,7 @@ Boosted listings, reports on profiles, push notifications, Idempotency-Key table
 5. **Done.** Public reads, map with clustering, and rate limits.
 6. Requirements and matching (perfect, strong, conflicts tiers).
 7. **Done.** Connect, notifications sidebar, and connection-scoped profile access.
-8. Saved, reports, admin suspend, audit tables.
+8. **Done.** Saved listings, reports, admin suspend, audit tables, and saved-listing change notifications.
 9. Jobs, outbox worker, account deletion.
 10. Observability, then a staging load test at 50k tenants and 20k listings with `EXPLAIN` checks. Prove real GiST index usage and log the DBSCAN clustering input cap risk. Targets: matches p95 300 ms, map p95 200 ms. [UNVERIFIED targets until measured]
 
@@ -219,6 +220,11 @@ Every route in section 6 must have an owning build step.
 - `test_jobs_skip_suspended_listings`
 - `test_admin_actions_audited`
 - `test_admin_route_checks_admins_table`
+- `test_admin_suspend_hides_listing_from_public_and_locks_owner`
+- `test_admin_suspend_requires_reason_and_409_cases`
+- `test_admin_resolve_idempotent_no_second_audit_row`
+- `test_admin_actions_not_updatable_or_deletable_by_rentra_api`
+- `test_new_routes_require_auth`
 - `test_logs_contain_no_phone_coords_ip`
 - `test_read_limit_per_ip_and_per_user`
 - `test_role_switch_keeps_both_sides_data`
@@ -283,23 +289,32 @@ Every route in section 6 must have an owning build step.
 **Idempotency and jobs**
 
 - `test_connect_twice_one_row_one_notification`
-- `test_connect_creates_both_notifications_atomically`
+- `test_connect_creates_both_notifications_atomically` (trigger marker survives rollback; connection insert is rolled back)
 - `test_connect_non_public_listing_404`
 - `test_connect_requires_auth`
 - `test_connect_returns_wa_link_digits_only`
 - `test_connect_concurrent_double_call_one_row`
-- `test_notifications_list_own_only_and_keyset`
-- `test_notification_read_idempotent`
+- `test_notifications_list_own_only_and_keyset` (excludes another user's notification; checks kind and joined listing fields)
+- `test_notification_read_idempotent` (checks stable response timestamp and persisted `read_at`)
 - `test_notification_read_foreign_id_404`
 - `test_connections_list_own_only_and_wa_link_only_if_public`
 - `test_connection_and_notifications_cascade_on_account_delete`
+- `test_save_idempotent_and_own_rejected`
+- `test_save_non_public_404_and_unsave_after_non_public_ok`
+- `test_me_saved_own_only_keyset_and_wa_link_only_if_visible`
+- `test_saved_listing_visibility_flip_notifies`
+- `test_report_snapshot_and_idempotent_repeat`
+- `test_report_own_rejected_and_non_public_404`
+- `test_report_cap_ten_per_rolling_24h`
+- `test_report_survives_listing_purge`
+- `test_phone_never_in_logs_or_errors_for_report_and_admin_routes`
 - `test_connect_without_tenant_whatsapp_succeeds`
 - `test_landlord_can_open_connector_profile`
 - `test_connector_profile_null_whatsapp_when_tenant_has_none`
 - `test_connector_whatsapp_cleared_later_disappears`
 - `test_connector_profile_foreign_user_404`
 - `test_tenant_can_open_landlord_profile_only_while_listing_public`
-- `test_connector_phone_never_in_logs_or_errors`
+- `test_connector_phone_never_in_logs_or_errors` (checks successful/error responses, notification and connection feeds, and logs)
 - `test_each_job_twice_is_noop`
 - `test_job_concurrent_run_second_exits`
 - `test_purge_storage_failure_retried_by_outbox`

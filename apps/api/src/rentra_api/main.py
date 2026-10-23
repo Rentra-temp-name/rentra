@@ -39,6 +39,62 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 app = FastAPI(title="Rentra API", version="0.1.0", lifespan=lifespan)
 logger = logging.getLogger("rentra_api")
 
+MATCHES_SQL = """WITH loc AS (
+      SELECT search_point, search_radius_km FROM app.tenant_locations WHERE user_id=%s
+    ), checks AS (
+      SELECT l.id,l.title,l.rent_amount,l.created_at,
+        extensions.st_y(l.point::extensions.geometry) lat,extensions.st_x(l.point::extensions.geometry) lng,
+        p.whatsapp,
+        count(*) FILTER(WHERE r.importance='must' AND miss) must_miss,
+        count(*) FILTER(WHERE r.importance='nice' AND miss) nice_miss,
+        count(*) FILTER(WHERE r.importance='must') must_total,
+        count(*) FILTER(WHERE r.importance='nice') nice_total,
+        coalesce(jsonb_agg(jsonb_build_object('field',r.label,'value',r.expected,'importance',r.importance)) FILTER(WHERE miss), '[]'::jsonb) misses
+      FROM app.listings l CROSS JOIN loc
+      CROSS JOIN LATERAL app.get_public_profile(l.owner_id) p
+      LEFT JOIN LATERAL (
+        SELECT r.importance, coalesce(a.key,n.field) label, coalesce(o.label,n.field) expected,
+          CASE WHEN n.field IS NOT NULL THEN
+            CASE n.field WHEN 'rent_amount' THEN l.rent_amount > n.value
+              ELSE coalesce(ln.value,0) < n.value END
+          ELSE NOT EXISTS (SELECT 1 FROM app.listing_answers la WHERE la.listing_id=l.id AND la.attribute_id=r.attribute_id AND la.option_id=r.option_id)
+            AND NOT EXISTS(SELECT 1 FROM app.listing_answers la JOIN app.attribute_options ao ON ao.id=la.option_id WHERE la.listing_id=l.id AND la.attribute_id=r.attribute_id AND ao.is_exclusive)
+          END miss
+        FROM (SELECT user_id,attribute_id,option_id,pick_rule,importance,NULL::text field FROM app.requirements WHERE user_id=%s
+              UNION ALL SELECT user_id,NULL,NULL,NULL,importance,field FROM app.requirement_numeric WHERE user_id=%s) r
+        LEFT JOIN app.attributes a ON a.id=r.attribute_id LEFT JOIN app.attribute_options o ON o.id=r.option_id
+        LEFT JOIN app.requirement_numeric n ON n.user_id=r.user_id AND n.field=r.field
+        LEFT JOIN app.listing_numeric ln ON ln.listing_id=l.id AND ln.field=r.field
+      ) r ON true
+      WHERE l.status='active' AND l.suspended_at IS NULL AND l.owner_id<>%s
+        AND extensions.st_dwithin(l.point,loc.search_point,loc.search_radius_km*1000)
+      GROUP BY l.id,p.whatsapp
+    ), scored AS (
+      SELECT checks.*, CASE WHEN must_total>0 THEN (must_total-must_miss)::numeric/must_total
+        WHEN nice_total>0 THEN (nice_total-nice_miss)::numeric/nice_total ELSE 1::numeric END score,
+        ((must_total>0 AND must_miss=0) OR (must_total=0 AND nice_total>0 AND nice_miss=0)) perfect_flag,
+        (must_total=0 AND nice_total=0) explore_flag
+      FROM checks
+    ), ordered AS (
+      SELECT *,
+        row_number() OVER(PARTITION BY perfect_flag ORDER BY score DESC, CASE WHEN must_total>0 THEN nice_total-nice_miss ELSE 0 END DESC, rent_amount,created_at DESC,id) ranked_row,
+        current_date::text shuffle_day, md5(id::text||current_date::text) shuffle_key
+      FROM scored
+    ), page AS (
+      SELECT ordered.*, row_number() OVER(PARTITION BY explore_flag ORDER BY shuffle_key,id) explore_page_row
+      FROM ordered
+      WHERE (%s::date IS NULL OR (explore_flag AND shuffle_day=%s AND (shuffle_key,id)>(%s,%s::uuid)) OR NOT explore_flag)
+    ) SELECT id,title,rent_amount,lat,lng,whatsapp,created_at,misses,perfect_flag,explore_flag,must_total,nice_total,
+      (SELECT coalesce(jsonb_agg(jsonb_build_object('id',ph.id,'position',ph.position,'width',ph.width,'height',ph.height,'storage_path',ph.storage_path,'thumb_path',ph.thumb_path) ORDER BY ph.position),'[]'::jsonb) FROM app.listing_photos ph WHERE ph.listing_id=page.id),
+      shuffle_day,shuffle_key
+      FROM page
+      WHERE (NOT explore_flag OR explore_page_row<=%s)
+        AND (explore_flag OR perfect_flag OR ranked_row<=100)
+      ORDER BY CASE WHEN explore_flag THEN 2 ELSE 1 END,
+        CASE WHEN explore_flag THEN shuffle_key END, score DESC,
+        CASE WHEN must_total>0 THEN nice_total-nice_miss ELSE 0 END DESC,
+        rent_amount,created_at DESC,id"""
+
 
 class InProcessReadLimiter:
     """One-process sliding-window limiter for public read routes."""
@@ -130,7 +186,8 @@ async def limit_public_reads(request: Request, call_next):
                 status_code=413,
                 content={"code": "PHOTO_TOO_LARGE", "message": "Photo exceeds 5 MB"},
             )
-    is_write = request.method in {"POST", "PATCH", "DELETE"} and (
+    is_write = request.method in {"POST", "PATCH", "DELETE", "PUT"} and (
+        path == "/me/requirements" or
         path == "/listings" or (path.startswith("/listings/") and not path.endswith("/connect"))
     )
     is_read = request.method == "GET" and (
@@ -371,7 +428,6 @@ class ListingCreate(BaseModel):
     title: str = Field(min_length=1, max_length=500)
     rent_amount: Decimal = Field(gt=0, max_digits=12, decimal_places=2)
     point: ListingPointInput
-    size_unit: str | None = None
 
     @field_validator("title")
     @classmethod
@@ -380,14 +436,6 @@ class ListingCreate(BaseModel):
             raise ValueError("title must not be blank")
         return value.strip()
 
-    @field_validator("size_unit")
-    @classmethod
-    def valid_size_unit(cls, value: str | None) -> str | None:
-        if value is not None and value not in {"aana", "ropani", "sq_ft"}:
-            raise ValueError("invalid size unit")
-        return value
-
-
 class ListingPatch(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
@@ -395,7 +443,6 @@ class ListingPatch(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=500)
     rent_amount: Decimal | None = Field(default=None, gt=0, max_digits=12, decimal_places=2)
     point: ListingPointInput | None = None
-    size_unit: str | None = None
     answers: dict[str, list[str] | str] | None = None
     numeric: dict[str, float] | None = None
 
@@ -405,13 +452,6 @@ class ListingPatch(BaseModel):
         if value is not None and not value.strip():
             raise ValueError("title must not be blank")
         return value.strip() if value is not None else None
-
-    @field_validator("size_unit")
-    @classmethod
-    def valid_size_unit(cls, value: str | None) -> str | None:
-        if value is not None and value not in {"aana", "ropani", "sq_ft"}:
-            raise ValueError("invalid size unit")
-        return value
 
     @model_validator(mode="after")
     def has_patch_fields(self) -> "ListingPatch":
@@ -447,6 +487,25 @@ class PhotoReorderInput(BaseModel):
 
 class StrictResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class RequirementNumericInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    value: Decimal = Field(gt=0, max_digits=12, decimal_places=2)
+    importance: Literal["must", "nice"]
+
+
+class RequirementsInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    attributes: dict[str, dict[str, Literal["must", "nice"]]] = Field(default_factory=dict)
+    numeric: dict[str, RequirementNumericInput] = Field(default_factory=dict)
+
+
+class MatchesResponse(StrictResponse):
+    perfect: list[dict[str, Any]]
+    ranked: list[dict[str, Any]]
+    explore: bool = False
+    nudge: bool = False
 
 
 class ListingPhotoResponse(StrictResponse):
@@ -1160,7 +1219,7 @@ def _check_photo_listing_state(state: tuple[str, Any] | None) -> None:
 
 def _owned_listing_json(conn: psycopg.Connection, owner_id: str, listing_id: str) -> dict[str, Any]:
     row = conn.execute(
-        """SELECT listing.id, listing.title, listing.rent_amount, listing.size_unit,
+        """SELECT listing.id, listing.title, listing.rent_amount,
                   extensions.st_y(listing.point::extensions.geometry),
                   extensions.st_x(listing.point::extensions.geometry), listing.status,
                   listing.version, listing.created_at, listing.updated_at,
@@ -1199,12 +1258,12 @@ def _owned_listing_json(conn: psycopg.Connection, owner_id: str, listing_id: str
         answer_map.setdefault(attribute_key, []).append(option_key)
     return {
         "id": str(row[0]), "title": row[1], "rent_amount": str(row[2]),
-        "size_unit": row[3], "point": {"lat": float(row[4]), "lng": float(row[5])},
-        "status": row[6], "version": row[7],
-        "created_at": row[8].isoformat(), "updated_at": row[9].isoformat(),
-        "archived_from_status": row[10],
-        "archived_at": row[11].isoformat() if row[11] else None,
-        "status_changed_at": row[12].isoformat(),
+        "point": {"lat": float(row[3]), "lng": float(row[4])},
+        "status": row[5], "version": row[6],
+        "created_at": row[7].isoformat(), "updated_at": row[8].isoformat(),
+        "archived_from_status": row[9],
+        "archived_at": row[10].isoformat() if row[10] else None,
+        "status_changed_at": row[11].isoformat(),
         "answers": answer_map,
         "numeric": {key: str(value) for key, value in numeric},
     }
@@ -1249,7 +1308,7 @@ def _validate_answer_payload(conn: psycopg.Connection, answers: dict[str, list[s
 
 
 NUMERIC_LISTING_FIELDS = {
-    "bedrooms", "bathrooms_total", "western_commodes", "indian_squat_toilets",
+    "bedrooms", "bathrooms_total",
     "kitchen_count", "balconies", "total_floors", "size_value", "max_people",
     "road_access_width_ft", "main_road_distance_km",
 }
@@ -1291,13 +1350,12 @@ def create_listing(
                     detail={"code": "DRAFT_LIMIT", "message": "Maximum number of drafts reached"},
                 )
             listing_id = conn.execute(
-                """INSERT INTO app.listings (owner_id, title, rent_amount, point, size_unit)
+                """INSERT INTO app.listings (owner_id, title, rent_amount, point)
                    VALUES (%s, %s, %s,
-                     extensions.st_setsrid(extensions.st_makepoint(%s, %s), 4326)::extensions.geography,
-                     %s)
+                     extensions.st_setsrid(extensions.st_makepoint(%s, %s), 4326)::extensions.geography)
                    RETURNING id""",
                 (owner_id, body.title, body.rent_amount,
-                 body.point.lng, body.point.lat, body.size_unit),
+                 body.point.lng, body.point.lat),
             ).fetchone()[0]
             return _owned_listing_json(conn, owner_id, str(listing_id))
     except HTTPException:
@@ -1535,9 +1593,6 @@ def patch_listing(
             if "rent_amount" in explicitly_set:
                 assignments.append("rent_amount = %s")
                 values.append(body.rent_amount)
-            if "size_unit" in explicitly_set:
-                assignments.append("size_unit = %s")
-                values.append(body.size_unit)
             if "point" in explicitly_set:
                 assignments.append("point = extensions.st_setsrid(extensions.st_makepoint(%s, %s), 4326)::extensions.geography")
                 values.extend((body.point.lng, body.point.lat))
@@ -2031,12 +2086,12 @@ def suspend_admin_listing(
         with get_db_connection() as conn:
             conn.execute("SELECT set_config('app.user_id', %s, true)", (str(profile["id"]),))
             row = conn.execute(
-                "SELECT * FROM app.admin_suspend_listing(%s, %s)",
+                "SELECT result.id AS listing_id, result.suspended_at AS suspended_at FROM app.admin_suspend_listing(%s, %s) AS result",
                 (listing_id, body.reason),
             ).fetchone()
     except psycopg.Error as exc:
         raise _step8_db_error(exc) from exc
-    return {"listing_id": row[0], "suspended_at": row[10]}
+    return {"listing_id": row[0], "suspended_at": row[1]}
 
 
 @app.post("/admin/listings/{listing_ref}/unsuspend", response_model=AdminUnsuspendResponse)
@@ -2117,6 +2172,94 @@ def read_public_listings(
     if has_more and visible_rows:
         next_cursor = _encode_listing_cursor(str(visible_rows[-1][2]), visible_rows[-1][0])
     return {"listings": [_listing_result(row) for row in visible_rows], "next_cursor": next_cursor}
+
+
+@app.put("/me/requirements")
+def replace_requirements(body: RequirementsInput, profile: Annotated[dict[str, Any], Depends(get_current_profile)]) -> dict[str, bool]:
+    uid = str(profile["id"])
+    try:
+        with get_db_connection() as conn:
+            conn.execute("SELECT set_config('app.user_id', %s, true)", (uid,))
+            with conn.transaction():
+                conn.execute("DELETE FROM app.requirements WHERE user_id=%s", (uid,))
+                conn.execute("DELETE FROM app.requirement_numeric WHERE user_id=%s", (uid,))
+                for key, picks in body.attributes.items():
+                    rows = conn.execute(
+                        """SELECT a.id, a.pick_rule, o.id, o.label FROM app.attributes a
+                           JOIN app.attribute_options o ON o.attribute_id=a.id
+                           WHERE a.key=%s AND a.is_active AND o.is_active""", (key,)
+                    ).fetchall()
+                    if not rows or any(label not in {r[3] for r in rows} for label in picks):
+                        raise HTTPException(status_code=422, detail={"code":"INVALID_REQUIREMENT_OPTION","message":"Unknown or inactive requirement option"})
+                    if not picks:
+                        continue
+                    rule = rows[0][1]
+                    if rule in {"single", "yes_no"} and len(picks) > 1:
+                        raise HTTPException(status_code=422, detail="Only one option is allowed")
+                    for label, importance in picks.items():
+                        option = next(r for r in rows if r[3] == label)
+                        conn.execute("INSERT INTO app.requirements(user_id,attribute_id,option_id,pick_rule,importance) VALUES (%s,%s,%s,%s,%s)", (uid, option[0], option[2], rule, importance))
+                allowed_numeric = {"rent_amount", "bedrooms", "bathrooms_total", "size_value", "max_people"}
+                if set(body.numeric) - allowed_numeric:
+                    raise HTTPException(status_code=422, detail={"code":"INVALID_REQUIREMENT_FIELD","message":"Unknown numeric requirement field"})
+                for field, requirement in body.numeric.items():
+                    inserted = conn.execute("INSERT INTO app.requirement_numeric(user_id,field,value,importance) SELECT %s,key,%s,%s FROM app.numeric_fields WHERE key=%s AND is_active", (uid, requirement.value, requirement.importance, field))
+                    if inserted.rowcount != 1:
+                        raise HTTPException(status_code=422, detail={"code":"INVALID_REQUIREMENT_FIELD","message":"Unknown or inactive numeric requirement field"})
+    except HTTPException:
+        raise
+    except psycopg.errors.UniqueViolation as exc:
+        raise HTTPException(status_code=422, detail="Only one single-choice must is allowed per attribute") from exc
+    except psycopg.Error as exc:
+        raise HTTPException(status_code=503, detail={"code":"REQUIREMENTS_STORAGE_UNAVAILABLE","message":"Requirements unavailable"}) from exc
+    return {"replaced": True}
+
+
+@app.get("/matches")
+def read_matches(
+    profile: Annotated[dict[str, Any], Depends(get_current_profile)],
+    cursor: str | None = None,
+    page_size: int = Query(20, ge=1, le=50),
+) -> dict[str, Any]:
+    uid = str(profile["id"])
+    cursor_day = cursor_hash = cursor_id = None
+    if cursor:
+        try:
+            raw_cursor = urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
+            cursor_day, cursor_hash, cursor_id = json.loads(raw_cursor)
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", cursor_day):
+                raise ValueError
+            if datetime.fromisoformat(cursor_day).date().isoformat() != cursor_day:
+                raise ValueError
+            if not re.fullmatch(r"[0-9a-f]{32}", cursor_hash):
+                raise ValueError
+            cursor_id = str(UUID(cursor_id))
+        except (ValueError, TypeError, json.JSONDecodeError):
+            raise HTTPException(status_code=422, detail={"code": "invalid_cursor", "message": "Invalid cursor"})
+    sql = MATCHES_SQL
+    try:
+        with get_db_connection() as conn:
+            conn.execute("SELECT set_config('app.user_id', %s, true)", (uid,))
+            rows = conn.execute(sql, (uid, uid, uid, uid, cursor_day, cursor_day,
+                                      cursor_hash, cursor_id, page_size + 1)).fetchall()
+    except psycopg.Error as exc:
+        logger.exception("GET /matches database query failed")
+        raise HTTPException(status_code=503, detail={"code":"MATCH_STORAGE_UNAVAILABLE","message":"Matches unavailable"}) from exc
+
+    has_more = len(rows) > page_size and bool(rows and rows[0][9])
+    visible_rows = rows[:page_size] if rows and rows[0][9] else rows
+    next_cursor = None
+    if has_more and visible_rows:
+        last = visible_rows[-1]
+        token = json.dumps([last[13], last[14], str(last[0])], separators=(",", ":")).encode()
+        next_cursor = urlsafe_b64encode(token).decode().rstrip("=")
+    perfect=[]; ranked=[]; explore=[]
+    for row in visible_rows:
+        listing={"id":str(row[0]),"title":row[1],"rent_amount":str(row[2]),"point":{"latitude":float(row[3]),"longitude":float(row[4])},"whatsapp":row[5],"created_at":row[6].isoformat(),"photos":[{"id":str(ph['id']),"position":ph['position'],"width":ph['width'],"height":ph['height'],"original_url":_photo_public_url(ph['storage_path']),"thumb_url":_photo_public_url(ph['thumb_path']) if ph['thumb_path'] else None} for ph in row[12]]}
+        if row[8]: perfect.append(listing)
+        elif row[9]: explore.append(listing)
+        else: ranked.append({"listing":listing,"misses":[f"{m['field']}: {m['value']}" for m in row[7] if row[10] == 0 or m["importance"] == "must"]})
+    return {"perfect":perfect,"ranked":ranked,"explore":bool(rows and rows[0][9]),"nudge":not rows or all(row[9] for row in rows),"explore_listings":explore,"next_cursor":next_cursor}
 
 
 @app.get("/listings/{listing_ref}")

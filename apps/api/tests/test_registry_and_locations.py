@@ -71,7 +71,7 @@ def test_get_registry_works_without_authentication():
     registry = response.json()
     assert len(registry["attributes"]) == 34
     assert sum(len(attribute["options"]) for attribute in registry["attributes"]) == 89
-    assert len(registry["numeric_fields"]) == 12
+    assert len(registry["numeric_fields"]) == 10
 
 
 def test_rentra_api_cannot_write_registry(test_database_url):

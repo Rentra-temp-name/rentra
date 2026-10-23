@@ -195,8 +195,6 @@ def test_publish_requires_fields_answers_amenities_and_phone(
     required_numeric_fields = (
         "bedrooms",
         "bathrooms_total",
-        "western_commodes",
-        "indian_squat_toilets",
         "kitchen_count",
         "balconies",
         "total_floors",

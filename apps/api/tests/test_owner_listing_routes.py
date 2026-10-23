@@ -13,8 +13,7 @@ from rentra_api.main import app
 
 POINT = {"lat": 27.7172, "lng": 85.3249}
 CORE_NUMERIC = (
-    "bedrooms", "bathrooms_total", "western_commodes", "indian_squat_toilets",
-    "kitchen_count", "balconies", "total_floors",
+    "bedrooms", "bathrooms_total", "kitchen_count", "balconies", "total_floors",
 )
 
 
@@ -199,6 +198,24 @@ def test_patch_rejects_invalid_option_wrong_attribute_cardinality_and_rent_numer
                 json={"version": listing["version"], **invalid},
             )
             assert response.status_code == 422, response.text
+
+
+def test_size_unit_is_rejected_on_create_and_patch(signed_in_user):
+    with TestClient(app) as client:
+        assert client.get("/me", headers=signed_in_user["headers"]).status_code == 200
+        create = client.post(
+            "/listings", headers=signed_in_user["headers"],
+            json={"title": "Sq ft only", "rent_amount": 20000, "point": POINT, "size_unit": "aana"},
+        )
+        listing = client.post(
+            "/listings", headers=signed_in_user["headers"],
+            json={"title": "Sq ft only", "rent_amount": 20000, "point": POINT},
+        ).json()
+        patch = client.patch(
+            f"/listings/{listing['id']}", headers=signed_in_user["headers"],
+            json={"version": listing["version"], "size_unit": "ropani"},
+        )
+    assert create.status_code == patch.status_code == 422
 
 
 def test_foreign_user_gets_not_found_on_all_owner_id_routes(db_conn, signed_in_pair):

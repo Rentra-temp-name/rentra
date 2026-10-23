@@ -47,7 +47,7 @@ All in schema `app`. Names are guidance, constraints are required.
 - `listing_answers(listing_id, attribute_id, option_id)`, PK is all three. Yes/no attributes store the answer as an option row (Yes / No).
 - `listing_numeric(listing_id, field, value)`, for the numeric fields in section 16 other than `rent_amount`, which is a listing column.
 - `listing_photos(id, listing_id, storage_path, thumb_path, width int NOT NULL CHECK (width > 0), height int NOT NULL CHECK (height > 0), position smallint NOT NULL CONSTRAINT listing_photos_position_check CHECK (position BETWEEN 1 AND 10), CONSTRAINT listing_photos_listing_position_key UNIQUE (listing_id, position) DEFERRABLE INITIALLY DEFERRED)`. Photo cap of 10 comes from the position check constraint, not app code.
-- Requirements: `requirements(user_id, attribute_id, option_id, importance must|nice)`, plus numeric requirements `requirement_numeric(user_id, field, value, importance)` for rent max, bedrooms min, max people, and any numeric field in section 16. Each carries its own importance. Pick-one attributes: denormalize `pick_rule` onto the row with a composite FK to the registry, and `UNIQUE (user_id, attribute_id) WHERE importance='must' AND pick_rule='single'`.
+- Requirements: `requirements(user_id, attribute_id, option_id, importance must|nice)`, plus `requirement_numeric(user_id, field, value, importance)`. Both tables have RLS, same-migration constraints, indexes, and explicit FK deletes. `requirements` denormalizes `pick_rule`, uses composite FKs to registry, and has `UNIQUE (user_id, attribute_id) WHERE importance='must' AND pick_rule='single'`. Allowed numeric requirements: rent max, bedrooms min, bathrooms_total min, size_value min (sq ft), max_people minimum listing occupancy. Direction is fixed in code. Kitchen, balconies, total floors, road access width, and main-road distance are display-only.
 - `connections(id, user_id FK CASCADE, listing_id FK CASCADE, created_at, UNIQUE(user_id, listing_id))`. Indexes `(user_id, created_at)` and `(listing_id, created_at)`.
 - `notifications(id, user_id FK CASCADE, kind, listing_id, other_user_id, created_at, read_at)`. Typed columns, no jsonb. Powers the in-app notifications sidebar.
 - `saved_listings(user_id, listing_id, created_at)`, PK both.
@@ -81,20 +81,13 @@ Statuses: `draft, active, rented, sold_out, unavailable, archived`. No `deleted`
 
 ## 5. Matching
 
-- Each requirement is marked must or nice by the tenant, including numeric ones. Applies uniformly to every attribute. Attributes the tenant doesn't set are ignored. [PRODUCT]
-- A must is a hard gate. Any missed must puts the listing in Conflicts, with each miss named.
-- Multi-choice must: the listing must have every picked option. Yes/no attributes (pets allowed) are plain yes or no. [PRODUCT]
-- Tenant-type options (bachelors, family, all allowed) are a multi attribute on the landlord side. "All allowed" is exclusive, so it satisfies any tenant pick on that attribute. [PRODUCT]
-- Tiers:
-  - **Perfect match:** all musts met and all nices met.
-  - **Strong match:** all musts met, some nices missed. Ranked by percentage of nices met.
-  - **Conflict:** one or more musts missed, each miss named. Ranked by fewest misses, then percentage of nices met.
-- Missing answer on a must counts as a miss. Optional question with no answer counts as 0 for a nice.
-- Ordering: Perfect matches rank by rent asc, then created_at desc, then id. Strong matches rank by nice percentage desc, rent asc, created_at desc, id. Conflicts rank by misses asc, nice percentage desc, rent asc, created_at desc, id.
-- Eligible: public-visible listings, not the caller's own, inside the tenant's search area.
-- One SQL query, never scored in Python. Strong matches capped at 200, conflicts at 100. Perfect matches are not capped. No pagination.
-- Response: `{perfect: [...], strong: [...], conflicts: [{listing, misses: [...]}]}`. Perfect matches show first as tiles, with the "N perfect matches found" message, then strong matches, then conflicts.
-- Users with no requirements get the explore feed: eligible listings in their area, keyset paginated, stable daily shuffle `ORDER BY md5(id::text || current_date::text), id`. Nudge CTAs to set preferences.
+- `PUT /me/requirements` fully replaces the tenant requirements. Strict Pydantic rejects unknown fields; registry validation accepts active attributes/options only. Limit: 20 writes per minute per user.
+- Every selected option row is a separate check, including each multi-choice must. Missing listing answers fail that check. An `is_exclusive` option on the listing satisfies every pick for that attribute.
+- Numeric requirement direction is fixed in code: rent is an upper bound from `listings.rent_amount`; bedrooms, bathrooms_total, size_value (sq ft), and max_people are tenant minima, with listing `max_people` required to be at least the tenant group size. Tenant household type is not stored.
+- Eligible listings are public-visible (`active`, not suspended), not owned by the caller, and inside the tenant search circle.
+- One SQL query computes every match; never score in Python. Score is must rows met / must rows total. Every must met is perfect. If there are no musts, use the same fraction over nice rows. If there are no requirements, return the daily md5 explore feed, keyset paginated, with a nudge flag.
+- Ordering: score desc, then nices met desc only when musts exist, rent asc, created_at desc, id. Perfect is uncapped; ranked is capped at 100. Every ranked result includes named misses.
+- Response: `{perfect: [...], ranked: [{listing, misses: [...]}], explore: bool, nudge: bool, explore_listings: [...], next_cursor}`. Explore pages are capped to `page_size` and use a daily keyset on `(md5(id::text || current_date::text), id)`. Listing payloads follow public listing reads and include phone, point, and photos.
 
 ## 6. Endpoints
 
@@ -109,7 +102,7 @@ Errors use stable codes where defined. Direct JSON responses return `{code, mess
 | `GET /listings/{id}` | none | full detail, includes phone and point. Returns `photos` ordered by position; each item has `id`, `position`, `width`, `height`, `original_url`, and `thumb_url`. |
 | `GET /map?bbox=&zoom=` | none | bbox and zoom required. Returns server-side clusters at low zoom and individual points at high zoom. Each cluster returns count and centroid. Individual points return id, lat, lng, rent only. Response is capped. [ENG] |
 | `GET/PUT /me`, `DELETE /me` | user | delete needs `{confirm:true}`. `PUT /me` with `whatsapp:null` or an empty string clears it; the API first returns `WHATSAPP_CLEAR_ARCHIVES_LISTINGS` with the active non-suspended listing count, then requires `{confirm:true}` to archive those listings and clear the number. |
-| `PUT /me/requirements`, `GET /matches` | user |  |
+| `PUT /me/requirements`, `GET /matches` | user | Full replacement; active-registry validation, 20 writes/minute. Matches are one SQL query; perfect uncapped, ranked capped at 100, and empty requirements use keyset-paginated explore feed with nudge flag. |
 | `POST/DELETE /listings/{id}/save`, `GET /me/saved` | user |  |
 | `POST /listings/{id}/connect`, `GET /me/connections` | user | see section 7 |
 | `GET /me/connections/profile/{user_id}` | user | connection-scoped profile; see section 7 |
@@ -189,7 +182,7 @@ Boosted listings, reports on profiles, push notifications, Idempotency-Key table
 4b. **Done.** Photos: store width, height, and thumbnail path; validate jpeg/png/webp bytes and decoded pixel count, apply EXIF orientation, re-encode metadata-free originals, generate fixed-box fit-and-pad thumbnails, and implement upload, delete, and reorder routes.
 4c. **Done.** Owner listing routes: create drafts, owner reads, versioned PATCH with registry-validated answers and numeric values, and lifecycle calls through the existing database functions. Enforce the 20-draft cap and 20 writes/minute/user limit.
 5. **Done.** Public reads, map with clustering, and rate limits.
-6. Requirements and matching (perfect, strong, conflicts tiers).
+6. **In progress; not done.** Requirements and matching. The user must run the real-Postgres tests and confirm they pass before this step is marked done. `size_unit` is removed; `size_value` is square feet only.
 7. **Done.** Connect, notifications sidebar, and connection-scoped profile access.
 8. **Done.** Saved listings, reports, admin suspend, audit tables, and saved-listing change notifications.
 9. Jobs, outbox worker, account deletion.
@@ -234,21 +227,27 @@ Every route in section 6 must have an owning build step.
 
 **Matching**
 
-- `test_missed_must_goes_to_conflicts_and_is_named`
-- `test_all_musts_met_all_nices_met_is_perfect`
-- `test_all_musts_met_some_nices_missed_is_strong`
-- `test_strong_ranked_by_nice_percentage`
-- `test_zero_nices_is_strong_not_perfect`
-- `test_multichoice_must_requires_all_picked`
-- `test_all_allowed_satisfies_any_tenant_type_pick`
-- `test_numeric_requirement_must_vs_nice`
+- `test_missed_must_ranks_lower_and_is_named`
+- `test_all_musts_met_is_perfect`
+- `test_matching_ranks_by_must_fraction`
+- `test_nice_tiebreak_among_equal_must_scores`
+- `test_no_musts_falls_back_to_nices`
+- `test_no_requirements_gets_explore_feed_and_nudge`
+- `test_multichoice_must_requires_all_picks`
+- `test_all_allowed_rule_satisfies_any_tenant_type_pick`
+- `test_each_numeric_requirement_direction_including_rent_from_listings`
 - `test_missing_answer_on_must_is_miss`
-- `test_pick_one_second_must_rejected_by_db`
-- `test_own_listing_excluded`
-- `test_tiebreak_order_all_tiers`
-- `test_strong_and_conflicts_capped_200_100_perfect_uncapped`
-- `test_no_requirements_gets_explore_feed`
+- `test_db_rejects_second_single_choice_must`
+- `test_put_rejects_inactive_option`
+- `test_own_suspended_and_outside_radius_listings_excluded`
+- `test_tiebreak_order`
+- `test_ranked_cap_100_and_perfect_uncapped`
 - `test_tenant_household_type_not_stored`
+- `test_explore_feed_page_size_cursor_no_duplicates_or_gaps`
+- `test_requirements_put_strict_and_rate_limited`
+- `test_put_rejects_display_only_numeric_fields`
+- `test_retired_numeric_fields_are_inactive_and_references_removed`
+- `test_size_unit_is_rejected_on_create_and_patch`
 
 **Lifecycle**
 
@@ -424,23 +423,20 @@ Notes per attribute:
 
 ### 16.2 Numeric fields
 
-Listing values are stored in `listing_numeric` except `rent_amount`, which is stored only on `listings`. Tenant numeric requirements are stored in `requirement_numeric`, and each carries must or nice.
+Listing values are stored in `listing_numeric` except `rent_amount`, stored only on `listings`. `size_value` is square feet only. Numeric requirement fields and directions are fixed in code, not stored in the requirement rows.
 
 | field | unit | notes |
 | --- | --- | --- |
-| `rent_amount` | NPR per month | listing column. Tenant side is a max rent |
-| `bedrooms` | count | tenant side is a min |
-| `bathrooms_total` | count | |
-| `western_commodes` | count | |
-| `indian_squat_toilets` | count | |
-| `kitchen_count` | count | |
-| `balconies` | count | |
-| `total_floors` | count | total floors in the building |
-| `size_value` | number | paired with `size_unit` |
-| `size_unit` | aana, ropani, sq_ft | stored as a listing field, converted in code for display only |
-| `max_people` | count | strict occupancy limit. Tenant side is the group size |
-| `road_access_width_ft` | feet | |
-| `main_road_distance_km` | kilometers | distance to the main bus stop or micro stand |
+| `rent_amount` | NPR per month | listing column; tenant maximum |
+| `bedrooms` | count | tenant minimum |
+| `bathrooms_total` | count | tenant minimum |
+| `size_value` | sq ft | tenant minimum |
+| `max_people` | count | tenant group size; listing capacity must be at least this value |
+| `kitchen_count` | count | display-only, not a requirement |
+| `balconies` | count | display-only, not a requirement |
+| `total_floors` | count | display-only, not a requirement |
+| `road_access_width_ft` | feet | display-only, not a requirement |
+| `main_road_distance_km` | kilometers | display-only, not a requirement |
 
 ### 16.3 Removed from V1 (archived, not in the registry)
 
@@ -455,3 +451,4 @@ These stay in the parking-lot doc:
 
 - Landlords can select more than one tenant-type option at once (multi attribute).
 - Amenities and the core room and layout fields are required at publish, as listed in 16.1.
+

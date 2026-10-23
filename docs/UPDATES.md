@@ -7,3 +7,12 @@ Append new entries at the bottom only; never edit or delete older entries. The b
 - Known non-blocking test gaps: `test_magic_byte_mismatch_rejected` uses junk, not a valid PNG with JPEG magic; `test_photo_cap_race_two_uploads` lacks a barrier; `test_foreign_user_gets_404_on_photo_routes` does not check no row/object after rejected upload; no invalid reorder-list tests found (partial list, duplicate IDs, IDs from another listing). `test_content_length_precheck` does distinguish: its 6 MiB request exceeds the pre-check threshold, while the 5 MiB + 1 byte test stays below it and exercises the stream cap.
 - Reported full pytest run was green before the commit; not independently verified here. Section 13 calls accepted formats jpeg/png/webp; code accepts MPO as JPEG first frame, consistent with JPEG support.
 - Pending docs: `data-model.md`, `overview.md`, `auth-and-access.md`, and `user-flows.md` need syncing to the handoff.
+
+## 2026-10-23: step 6 remains incomplete
+- Requirements and matching remain in progress. Real-Postgres tests are prepared for user execution; do not mark step 6 done until the user confirms they pass.
+
+## 2026-10-23: step 6 implementation update
+- Step 6 remains not done pending user execution and confirmation of the real-Postgres matching tests.
+
+## 2026-10-24: step 6 implementation update
+- Step 6 remains not done. Waiting for the user's final green real-Postgres run and confirmation.

@@ -182,7 +182,7 @@ Boosted listings, reports on profiles, push notifications, Idempotency-Key table
 4b. **Done.** Photos: store width, height, and thumbnail path; validate jpeg/png/webp bytes and decoded pixel count, apply EXIF orientation, re-encode metadata-free originals, generate fixed-box fit-and-pad thumbnails, and implement upload, delete, and reorder routes.
 4c. **Done.** Owner listing routes: create drafts, owner reads, versioned PATCH with registry-validated answers and numeric values, and lifecycle calls through the existing database functions. Enforce the 20-draft cap and 20 writes/minute/user limit.
 5. **Done.** Public reads, map with clustering, and rate limits.
-6. **In progress; not done.** Requirements and matching. The user must run the real-Postgres tests and confirm they pass before this step is marked done. `size_unit` is removed; `size_value` is square feet only.
+6. **Done.** Requirements and matching. `size_unit` is removed; `size_value` is square feet only.
 7. **Done.** Connect, notifications sidebar, and connection-scoped profile access.
 8. **Done.** Saved listings, reports, admin suspend, audit tables, and saved-listing change notifications.
 9. Jobs, outbox worker, account deletion.

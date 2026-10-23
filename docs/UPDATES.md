@@ -16,3 +16,10 @@ Append new entries at the bottom only; never edit or delete older entries. The b
 
 ## 2026-10-24: step 6 implementation update
 - Step 6 remains not done. Waiting for the user's final green real-Postgres run and confirmation.
+
+## 2026-10-24: step 6 done
+- Commit: 5f58d03, requirements and matching.
+- User ran the real-Postgres suite: 199 passed, 1 skipped
+  (the skipped one is the opt-in EXPLAIN test, EXPLAIN_MATCHES=1).
+- Local EXPLAIN at 300 listings: about 20 ms execution, sane plan. This is a sanity check only. Step 10 must prove GiST use for st_dwithin at 20k listings, and watch the RLS subplans and the get_public_profile per-row call.
+- Done: steps 1-8 and polish. Not done: 9, 10. Next: step 9.

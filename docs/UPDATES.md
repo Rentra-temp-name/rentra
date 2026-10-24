@@ -31,3 +31,11 @@ Append new entries at the bottom only; never edit or delete older entries. The b
 - A job error returns NULL, so cron shows success. The step 10 last-success metric must read job_runs where error IS NULL.
 - Not done: 9b (outbox worker), 9c (DELETE /me and deletion sweep), 10. Next: 9b.
 - Commit hash: fill in after commit.
+
+## 2026-10-24: step 9b done
+- 9a commit hash: c80fa58.
+- Outbox worker: rentra_api/worker.py (python -m rentra_api.worker). Claim function leases rows for 5 minutes with FOR UPDATE SKIP LOCKED, complete and fail functions, exponential backoff capped at 6 hours, 404 counts as success, error text is a short code and never contains a path. The worker cycle survives DB errors and retries after 10s.
+- rentra_api has no table grants on storage_deletions. The worker only calls the three SECURITY DEFINER functions.
+- Full suite run by user: 214 passed, 1 skipped (opt-in EXPLAIN test).
+- Not done: 9c (DELETE /me and account deletion sweep), 10. Next: 9c.
+- Commit hash: add in the 9c entry.

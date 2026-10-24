@@ -186,7 +186,7 @@ Boosted listings, reports on profiles, push notifications, Idempotency-Key table
 7. **Done.** Connect, notifications sidebar, and connection-scoped profile access.
 8. **Done.** Saved listings, reports, admin suspend, audit tables, and saved-listing change notifications.
 9. Jobs, outbox worker, account deletion.
-9a done (SQL jobs). 9b outbox worker and 9c account deletion remain.
+9a and 9b done (SQL jobs, outbox worker). 9c account deletion remains.
 10. Observability, then a staging load test at 50k tenants and 20k listings with `EXPLAIN` checks. Prove real GiST index usage and log the DBSCAN clustering input cap risk. Targets: matches p95 300 ms, map p95 200 ms. [UNVERIFIED targets until measured]
 
 Every route in section 6 must have an owning build step.

@@ -186,7 +186,7 @@ Boosted listings, reports on profiles, push notifications, Idempotency-Key table
 7. **Done.** Connect, notifications sidebar, and connection-scoped profile access.
 8. **Done.** Saved listings, reports, admin suspend, audit tables, and saved-listing change notifications.
 9. Done. Jobs, outbox worker, account deletion.
-10. Observability, then a staging load test at 50k tenants and 20k listings with `EXPLAIN` checks. Prove real GiST index usage and log the DBSCAN clustering input cap risk. Targets: matches p95 300 ms, map p95 200 ms. [UNVERIFIED targets until measured]
+10. **Done with open items.** Observability (10a) is done. Scale check (10b): matches p95 about 220 to 246 ms for typical tenants (target 300 ms, met); map p95 134 ms zoomed out, 48 ms mid zoom, and 4 ms street level (target 200 ms, met); accuracy oracle: 600 tenants, 0 mismatches; full suite: 233 passed, 7 skipped on a clean reset. Open: wide-radius heavy tenants take 700 to 880 ms; load test and real-Supabase p95 remain for staging; DBSCAN input cap at Nepal-wide zoom is unmeasured.
 
 Every route in section 6 must have an owning build step.
 
@@ -363,7 +363,7 @@ Every route in section 6 must have an owning build step.
 ## 15. Dependencies and pending items
 
 - No district or city seed. The map handles location browsing. Search area is a point with a radius. The parking-lot doc is also not written.
-- Real GiST index usage is proven by the step 10 staging load test at 20k listings; small local EXPLAIN fixtures verify partial index availability and predicates, not actual GiST selection.
+- GiST was not selected by the planner at 20k listings locally (the status index was preferred). Speed targets were met without it; revisit GiST selection in staging.
 - Open question: pin-tap phone: listing page only (assumed, unconfirmed).
 - Cloudflare in front of the API, a privacy policy, and a consent line at publish ("your number and pin are public") are pre-launch items.
 - A consent line at connect ("if you saved a number, it is shared with this landlord") is a pre-launch item. Chat is a future feature.

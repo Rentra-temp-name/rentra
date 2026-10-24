@@ -57,3 +57,20 @@ Append new entries at the bottom only; never edit or delete older entries. The b
 - Open: test_api_works_through_transaction_pooler skipped (needs TEST_POOLER_DATABASE_URL), Docker image build not verified (pip network stall), cron schedule unverified locally, Sentry untested against a real DSN.
 - Not done: 10b (seed, EXPLAIN GiST proof, p95 at 50k tenants and 20k listings, DBSCAN cap risk). Next: 10b.
 - Commit hash: add in the 10b entry.
+
+## 2026-10-24: step 10b done, with open items
+- Earlier commits: 9c e8bfb64, 10a acb3486.
+- Matching scoring moved into app.match_checks (SECURITY DEFINER, STABLE, fixed search_path, raises MATCH_USER_MISMATCH 42501 if p_uid differs from app.user_id, granted to rentra_api only). MATCHES_SQL no longer does per-row profile lookup; whatsapp joined only for surviving rows.
+- Map moved into app.map_clusters and app.map_points (SECURITY DEFINER, rentra_api only). MAP_CLUSTER_SQL and MAP_POINTS_SQL are module constants.
+- Migrations: 20261024150000_match_checks_function.sql, 20261024160000_map_functions.sql. Clean db reset applied them with no errors.
+- Root cause of slowness: RLS re-checked every row of listings, listing_numeric, listing_answers, listing_photos, and the planner could not use the partial GiST index.
+- Results at 20k listings and 50k users: matches T1 median about 190 ms, p95 about 220 to 246 ms (before: median about 270). Map p95 134 ms zoomed out (8,620 in bbox), 48 ms mid zoom, 4 ms street level (before: 242, 25, 124). Targets: matches 300, map 200.
+- Accuracy oracle (scripts/check_match_accuracy.py): 500 tenants, 1,448,990 listings compared, 0 mismatches. Rerun of 100 tenants under background load (Windows Update running), 268,825 listings, 0 mismatches. Seed has no tenants for the "only nice rows" and "multi-choice must" buckets, those paths are covered by pytest only.
+- Full suite run by user after clean reset: 233 passed, 7 skipped (opt-in tests). test_seed_perf.py with SEED_PERF=1 passed 5 before the reset.
+- OPEN: wide-radius heavy tenants (14 requirements, 20 to 50 km radius) take 700 to 880 ms, mixed-sample p95 409 ms (100 tenants), max 1841 ms in the noisy 500 run. Local numbers are indicative only. Re-measure in staging.
+- OPEN: GiST not selected at 20k (planner prefers the status index). Speed targets met for typical tenants without it. Revisit in staging. Spec line "prove GiST" is unmet.
+- OPEN: DBSCAN clustering has no input cap, only the output is capped (MAP_RESPONSE_CAP, default 500). Nepal-wide zoom 6 view is unmeasured. Grid clustering shelved, revisit only if a wide view gets slow.
+- OPEN: load test (many searches at once) deferred to staging, local PC runs app, DB and test together.
+- Step 10 is done with logged open items, not fully sealed.
+- Not done: sync data-model.md, overview.md, auth-and-access.md, user-flows.md. Spec sections 13 and 15 were updated for step 10 and GiST.
+- Commit hash: add in the next entry.

@@ -15,6 +15,33 @@ from rentra_api.main import MATCHES_SQL, app
 POINT = {"latitude": 27.7172, "longitude": 85.3249}
 
 
+def test_match_checks_is_bound_to_app_user_and_not_public(signed_in_pair, test_database_url):
+    user, other_user = signed_in_pair
+    with psycopg.connect(get_settings().DATABASE_URL) as api_conn:
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            with api_conn.transaction():
+                api_conn.execute("SELECT set_config('app.user_id', %s, true)", (user["id"],))
+                api_conn.execute(
+                    "SELECT * FROM app.match_checks(%s, 85.32, 27.66, 5000)",
+                    (other_user["id"],),
+                )
+
+    with psycopg.connect(test_database_url) as admin_conn:
+        for role in ("anon", "authenticated"):
+            has_execute = admin_conn.execute(
+                "SELECT has_function_privilege(%s, 'app.match_checks(uuid,double precision,double precision,double precision)', 'EXECUTE')",
+                (role,),
+            ).fetchone()[0]
+            assert has_execute is False
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                with admin_conn.transaction():
+                    admin_conn.execute(f"SET LOCAL ROLE {role}")
+                    admin_conn.execute(
+                        "SELECT * FROM app.match_checks(%s, 85.32, 27.66, 5000)",
+                        (user["id"],),
+                    )
+
+
 @pytest.mark.skipif(os.environ.get("EXPLAIN_MATCHES") != "1", reason="set EXPLAIN_MATCHES=1 to run")
 def test_explain_matches_query(test_database_url, signed_in_pair):
     owner, tenant = signed_in_pair
@@ -78,12 +105,20 @@ def test_explain_matches_query(test_database_url, signed_in_pair):
             )
         seed_conn.commit()
 
-    params = (
-        tenant["id"], tenant["id"], tenant["id"], tenant["id"],
-        None, None, None, None, 20 + 1,
-    )
     with psycopg.connect(get_settings().DATABASE_URL) as explain_conn:
         explain_conn.execute("SELECT set_config('app.user_id', %s, true)", (tenant["id"],))
+        location = explain_conn.execute(
+            """SELECT extensions.st_x(search_point::extensions.geometry),
+                      extensions.st_y(search_point::extensions.geometry), search_radius_km
+               FROM app.tenant_locations WHERE user_id=%s""",
+            (tenant["id"],),
+        ).fetchone()
+        lng, lat, radius_km = location
+        params = (
+            tenant["id"],
+            float(lng), float(lat), float(radius_km) * 1000.0,
+            None, None, None, None, 20 + 1,
+        )
         plan = explain_conn.execute(
             "EXPLAIN (ANALYZE, BUFFERS) " + MATCHES_SQL,
             params,

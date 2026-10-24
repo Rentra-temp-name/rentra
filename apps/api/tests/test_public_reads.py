@@ -9,6 +9,7 @@ from collections import deque
 
 import jwt
 import psycopg
+import pytest
 from cryptography.hazmat.primitives.asymmetric import ec
 from starlette.testclient import TestClient
 
@@ -154,6 +155,52 @@ def test_map_response_cap_is_enforced(db_conn, signed_in_user, monkeypatch):
     assert response.status_code == 200
     assert len(response.json()["points"]) == 1
     assert response.json()["capped"] is True
+
+
+def test_map_functions_are_private_and_preserve_planted_bbox_results(
+    db_conn, signed_in_user, test_database_url
+):
+    ensure_profile(signed_in_user)
+    west, south, east, north = 85.2999999, 27.6999999, 85.3000001, 27.7000001
+    first_id = create_listing(
+        db_conn, signed_in_user["id"], 41001, longitude=85.30, latitude=27.70
+    )
+    second_id = create_listing(
+        db_conn, signed_in_user["id"], 41002, longitude=85.30, latitude=27.70
+    )
+    db_conn.commit()
+
+    with psycopg.connect(get_settings().DATABASE_URL) as api_conn:
+        points = api_conn.execute(
+            "SELECT * FROM app.map_points(%s, %s, %s, %s, %s)",
+            (west, south, east, north, 20),
+        ).fetchall()
+        clusters = api_conn.execute(
+            "SELECT * FROM app.map_clusters(%s, %s, %s, %s, %s, %s)",
+            (west, south, east, north, 0.01, 20),
+        ).fetchall()
+
+    assert [str(row[0]) for row in points] == [first_id, second_id]
+    assert [(round(row[1], 2), round(row[2], 2), int(row[3])) for row in points] == [
+        (27.70, 85.30, 41001),
+        (27.70, 85.30, 41002),
+    ]
+    assert len(clusters) == 1
+    assert clusters[0][0] == 2
+    assert round(clusters[0][1], 2) == 27.70
+    assert round(clusters[0][2], 2) == 85.30
+
+    denied_calls = (
+        ("SELECT * FROM app.map_points(%s, %s, %s, %s, %s)", (west, south, east, north, 20)),
+        ("SELECT * FROM app.map_clusters(%s, %s, %s, %s, %s, %s)", (west, south, east, north, 0.01, 20)),
+    )
+    with psycopg.connect(test_database_url) as admin_conn:
+        for role in ("anon", "authenticated"):
+            for sql, params in denied_calls:
+                with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                    with admin_conn.transaction():
+                        admin_conn.execute(f"SET LOCAL ROLE {role}")
+                        admin_conn.execute(sql, params)
 
 
 def test_read_limit_returns_429_retry_after_and_ignores_spoofed_forwarded_ip(monkeypatch):

@@ -51,36 +51,11 @@ JOB_LAST_SUCCESS = Gauge("job_last_success_timestamp", "Unix timestamp of last s
 STORAGE_BACKLOG = Gauge("storage_deletions_backlog", "Pending storage deletion rows")
 STORAGE_OLDEST = Gauge("storage_deletions_oldest_pending_seconds", "Age of oldest pending storage deletion")
 
-MATCHES_SQL = """WITH loc AS (
-      SELECT search_point, search_radius_km FROM app.tenant_locations WHERE user_id=%s
-    ), checks AS (
-      SELECT l.id,l.title,l.rent_amount,l.created_at,
-        extensions.st_y(l.point::extensions.geometry) lat,extensions.st_x(l.point::extensions.geometry) lng,
-        p.whatsapp,
-        count(*) FILTER(WHERE r.importance='must' AND miss) must_miss,
-        count(*) FILTER(WHERE r.importance='nice' AND miss) nice_miss,
-        count(*) FILTER(WHERE r.importance='must') must_total,
-        count(*) FILTER(WHERE r.importance='nice') nice_total,
-        coalesce(jsonb_agg(jsonb_build_object('field',r.label,'value',r.expected,'importance',r.importance)) FILTER(WHERE miss), '[]'::jsonb) misses
-      FROM app.listings l CROSS JOIN loc
-      CROSS JOIN LATERAL app.get_public_profile(l.owner_id) p
-      LEFT JOIN LATERAL (
-        SELECT r.importance, coalesce(a.key,n.field) label, coalesce(o.label,n.field) expected,
-          CASE WHEN n.field IS NOT NULL THEN
-            CASE n.field WHEN 'rent_amount' THEN l.rent_amount > n.value
-              ELSE coalesce(ln.value,0) < n.value END
-          ELSE NOT EXISTS (SELECT 1 FROM app.listing_answers la WHERE la.listing_id=l.id AND la.attribute_id=r.attribute_id AND la.option_id=r.option_id)
-            AND NOT EXISTS(SELECT 1 FROM app.listing_answers la JOIN app.attribute_options ao ON ao.id=la.option_id WHERE la.listing_id=l.id AND la.attribute_id=r.attribute_id AND ao.is_exclusive)
-          END miss
-        FROM (SELECT user_id,attribute_id,option_id,pick_rule,importance,NULL::text field FROM app.requirements WHERE user_id=%s
-              UNION ALL SELECT user_id,NULL,NULL,NULL,importance,field FROM app.requirement_numeric WHERE user_id=%s) r
-        LEFT JOIN app.attributes a ON a.id=r.attribute_id LEFT JOIN app.attribute_options o ON o.id=r.option_id
-        LEFT JOIN app.requirement_numeric n ON n.user_id=r.user_id AND n.field=r.field
-        LEFT JOIN app.listing_numeric ln ON ln.listing_id=l.id AND ln.field=r.field
-      ) r ON true
-      WHERE l.status='active' AND l.suspended_at IS NULL AND l.owner_id<>%s
-        AND extensions.st_dwithin(l.point,loc.search_point,loc.search_radius_km*1000)
-      GROUP BY l.id,p.whatsapp
+MAP_CLUSTER_SQL = "SELECT * FROM app.map_clusters(%s,%s,%s,%s,%s,%s)"
+MAP_POINTS_SQL = "SELECT * FROM app.map_points(%s,%s,%s,%s,%s)"
+
+MATCHES_SQL = """WITH checks AS (
+      SELECT * FROM app.match_checks(%s,%s,%s,%s)
     ), scored AS (
       SELECT checks.*, CASE WHEN must_total>0 THEN (must_total-must_miss)::numeric/must_total
         WHEN nice_total>0 THEN (nice_total-nice_miss)::numeric/nice_total ELSE 1::numeric END score,
@@ -96,16 +71,16 @@ MATCHES_SQL = """WITH loc AS (
       SELECT ordered.*, row_number() OVER(PARTITION BY explore_flag ORDER BY shuffle_key,id) explore_page_row
       FROM ordered
       WHERE (%s::date IS NULL OR (explore_flag AND shuffle_day=%s AND (shuffle_key,id)>(%s,%s::uuid)) OR NOT explore_flag)
-    ) SELECT id,title,rent_amount,lat,lng,whatsapp,created_at,misses,perfect_flag,explore_flag,must_total,nice_total,
+    ) SELECT page.id,page.title,page.rent_amount,page.lat,page.lng,p.whatsapp,page.created_at,page.misses,page.perfect_flag,page.explore_flag,page.must_total,page.nice_total,
       (SELECT coalesce(jsonb_agg(jsonb_build_object('id',ph.id,'position',ph.position,'width',ph.width,'height',ph.height,'storage_path',ph.storage_path,'thumb_path',ph.thumb_path) ORDER BY ph.position),'[]'::jsonb) FROM app.listing_photos ph WHERE ph.listing_id=page.id),
-      shuffle_day,shuffle_key
-      FROM page
-      WHERE (NOT explore_flag OR explore_page_row<=%s)
-        AND (explore_flag OR perfect_flag OR ranked_row<=100)
-      ORDER BY CASE WHEN explore_flag THEN 2 ELSE 1 END,
-        CASE WHEN explore_flag THEN shuffle_key END, score DESC,
-        CASE WHEN must_total>0 THEN nice_total-nice_miss ELSE 0 END DESC,
-        rent_amount,created_at DESC,id"""
+      page.shuffle_day,page.shuffle_key
+      FROM page CROSS JOIN LATERAL app.get_public_profile(page.owner_id) p
+      WHERE (NOT page.explore_flag OR page.explore_page_row<=%s)
+        AND (page.explore_flag OR page.perfect_flag OR page.ranked_row<=100)
+      ORDER BY CASE WHEN page.explore_flag THEN 2 ELSE 1 END,
+        CASE WHEN page.explore_flag THEN page.shuffle_key END, page.score DESC,
+        CASE WHEN page.must_total>0 THEN page.nice_total-page.nice_miss ELSE 0 END DESC,
+        page.rent_amount,page.created_at DESC,page.id"""
 
 
 class InProcessReadLimiter:
@@ -2390,8 +2365,23 @@ def read_matches(
     try:
         with get_db_connection() as conn:
             conn.execute("SELECT set_config('app.user_id', %s, true)", (uid,))
-            rows = conn.execute(sql, (uid, uid, uid, uid, cursor_day, cursor_day,
-                                      cursor_hash, cursor_id, page_size + 1)).fetchall()
+            location = conn.execute(
+                """SELECT extensions.st_x(search_point::extensions.geometry),
+                          extensions.st_y(search_point::extensions.geometry), search_radius_km
+                   FROM app.tenant_locations WHERE user_id=%s""",
+                (uid,),
+            ).fetchone()
+            if location is None:
+                lng = lat = radius_meters = None
+            else:
+                lng, lat, radius_km = location
+                lng, lat = float(lng), float(lat)
+                radius_meters = float(radius_km) * 1000.0
+            rows = conn.execute(
+                sql,
+                (uid, lng, lat, radius_meters, cursor_day, cursor_day,
+                 cursor_hash, cursor_id, page_size + 1),
+            ).fetchall()
     except psycopg.Error as exc:
         exception_name = re.sub(r"[^a-z0-9_]", "_", type(exc).__name__.lower())
         logger.error(
@@ -2468,25 +2458,7 @@ def read_map(bbox: str = Query(...), zoom: str = Query(...)) -> dict[str, Any]:
             if zoom_value < settings.MAP_CLUSTER_ZOOM:
                 eps = min(0.5, 0.002 * (2 ** (settings.MAP_CLUSTER_ZOOM - zoom_value)))
                 rows = conn.execute(
-                    """WITH visible AS (
-                           SELECT listing.id, listing.rent_amount,
-                                  listing.point::extensions.geometry AS geom
-                           FROM app.listings AS listing
-                           WHERE listing.status = 'active'
-                             AND listing.suspended_at IS NULL
-                             AND extensions.st_intersects(
-                                 listing.point,
-                                 extensions.st_makeenvelope(%s, %s, %s, %s, 4326)::extensions.geography
-                             )
-                       ), clustered AS (
-                           SELECT extensions.st_clusterdbscan(geom, %s, 1) OVER () AS cluster_id,
-                                  geom
-                           FROM visible
-                       )
-                       SELECT count(*)::integer,
-                              extensions.st_y(extensions.st_centroid(extensions.st_collect(geom))),
-                              extensions.st_x(extensions.st_centroid(extensions.st_collect(geom)))
-                       FROM clustered GROUP BY cluster_id ORDER BY cluster_id LIMIT %s""",
+                    MAP_CLUSTER_SQL,
                     (west, south, east, north, eps, cap + 1),
                 ).fetchall()
                 return {
@@ -2499,18 +2471,7 @@ def read_map(bbox: str = Query(...), zoom: str = Query(...)) -> dict[str, Any]:
                 }
 
             rows = conn.execute(
-                """SELECT listing.id,
-                          extensions.st_y(listing.point::extensions.geometry),
-                          extensions.st_x(listing.point::extensions.geometry),
-                          listing.rent_amount
-                   FROM app.listings AS listing
-                   WHERE listing.status = 'active'
-                     AND listing.suspended_at IS NULL
-                     AND extensions.st_intersects(
-                         listing.point,
-                         extensions.st_makeenvelope(%s, %s, %s, %s, 4326)::extensions.geography
-                     )
-                   ORDER BY listing.rent_amount, listing.id LIMIT %s""",
+                MAP_POINTS_SQL,
                 (west, south, east, north, cap + 1),
             ).fetchall()
     except psycopg.Error as exc:

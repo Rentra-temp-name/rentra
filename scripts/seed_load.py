@@ -123,14 +123,16 @@ WITH sampled_tenants AS MATERIALIZED (
     FROM seed_users
 ), points AS (
     SELECT sampled_tenants.*,
-           CASE WHEN place_roll < 0.10 THEN 80.0 + longitude_roll * 8.3
+            CASE WHEN __WORST_CASE__ THEN 85.324 + (longitude_roll - 0.5) * 0.04
+                 WHEN place_roll < 0.10 THEN 80.0 + longitude_roll * 8.3
                 WHEN place_roll < 0.28 THEN 85.324 + (longitude_roll - 0.5) * 0.08
                 WHEN place_roll < 0.46 THEN 85.325 + (longitude_roll - 0.5) * 0.07
                 WHEN place_roll < 0.62 THEN 85.429 + (longitude_roll - 0.5) * 0.07
                 WHEN place_roll < 0.78 THEN 83.986 + (longitude_roll - 0.5) * 0.08
                 WHEN place_roll < 0.90 THEN 84.436 + (longitude_roll - 0.5) * 0.08
                 ELSE 87.272 + (longitude_roll - 0.5) * 0.08 END AS lon,
-           CASE WHEN place_roll < 0.10 THEN 26.3 + latitude_roll * 4.2
+            CASE WHEN __WORST_CASE__ THEN 27.717 + (latitude_roll - 0.5) * 0.04
+                 WHEN place_roll < 0.10 THEN 26.3 + latitude_roll * 4.2
                 WHEN place_roll < 0.28 THEN 27.717 + (latitude_roll - 0.5) * 0.08
                 WHEN place_roll < 0.46 THEN 27.659 + (latitude_roll - 0.5) * 0.07
                 WHEN place_roll < 0.62 THEN 27.671 + (latitude_roll - 0.5) * 0.07
@@ -148,7 +150,7 @@ SELECT id,
        extensions.st_setsrid(extensions.st_makepoint(
            round(lon::numeric, 2)::double precision,
            round(lat::numeric, 2)::double precision), 4326)::extensions.geography,
-       CASE WHEN n % 6 = 0 THEN 10 + (n % 41) ELSE 5 END,
+        __SAMPLED_RADIUS__,
        created_at, created_at
 FROM points;
 
@@ -167,13 +169,13 @@ WITH selected_attributes AS (
            row_number() OVER (PARTITION BY users.id ORDER BY md5(users.id::text || attribute.key)) AS rn
     FROM seed_users AS users
     CROSS JOIN app.attributes AS attribute
-    WHERE attribute.is_active AND users.n BETWEEN 10001 AND 50000
+     WHERE attribute.is_active AND __ATTRIBUTE_USERS__
 ), chosen AS (
     SELECT * FROM selected_attributes
-    WHERE rn <= CASE WHEN n <= 30000 THEN 3 + (n % 2) ELSE 9 END
+    WHERE rn <= __ATTRIBUTE_LIMIT__
 ), option_choices AS (
     SELECT chosen.user_id, chosen.attribute_id, chosen.pick_rule,
-           CASE WHEN chosen.n <= 30000 THEN 'must'
+            CASE WHEN __STANDARD_ATTR_SHAPE__ THEN 'must'
                 WHEN chosen.rn <= 5 THEN 'must' ELSE 'nice' END AS importance,
            option.id AS option_id,
            row_number() OVER (
@@ -201,7 +203,7 @@ CROSS JOIN LATERAL (VALUES
 ) AS required(field, value, importance)
 JOIN app.numeric_fields AS numeric_field
   ON numeric_field.key = required.field AND numeric_field.is_active
-WHERE users.n BETWEEN 30001 AND 50000;
+WHERE __NUMERIC_REQUIREMENT_FILTER__;
 
 INSERT INTO app.requirements (user_id, attribute_id, option_id, pick_rule, importance)
 SELECT '__T1_UUID__'::uuid, attribute.id, option.id, attribute.pick_rule, 'must'
@@ -240,26 +242,29 @@ WITH sampled_listings AS MATERIALIZED (
            random() AS status_time_roll, random() AS photo_roll,
            random() AS suspension_roll,
            now() - random() * interval '365 days' AS created_at
-    FROM generate_series(1, 20000) AS n
+     FROM generate_series(1, __LISTING_COUNT__) AS n
 )
 INSERT INTO seed_listing_facts
 SELECT md5('rentra-load-listing-' || n::text)::uuid,
        md5('rentra-load-tenant-' || (((n - 1) % 8000) + 1)::text)::uuid,
-           CASE WHEN city_roll < 0.10 THEN 'Rural Nepal'
+            CASE WHEN __WORST_CASE__ THEN 'Kathmandu'
+                 WHEN city_roll < 0.10 THEN 'Rural Nepal'
                 WHEN city_roll < 0.28 THEN 'Kathmandu'
                 WHEN city_roll < 0.46 THEN 'Lalitpur'
                 WHEN city_roll < 0.62 THEN 'Bhaktapur'
                 WHEN city_roll < 0.78 THEN 'Pokhara'
                 WHEN city_roll < 0.89 THEN 'Bharatpur'
             ELSE 'Biratnagar' END,
-       CASE WHEN city_roll < 0.10 THEN 26.3 + latitude_roll * 4.2
+        CASE WHEN __WORST_CASE__ THEN 27.717 + (latitude_roll - 0.5) * 0.28
+             WHEN city_roll < 0.10 THEN 26.3 + latitude_roll * 4.2
             WHEN city_roll < 0.28 THEN 27.717 + (latitude_roll - 0.5) * 0.06
             WHEN city_roll < 0.46 THEN 27.659 + (latitude_roll - 0.5) * 0.05
             WHEN city_roll < 0.62 THEN 27.671 + (latitude_roll - 0.5) * 0.05
             WHEN city_roll < 0.78 THEN 28.210 + (latitude_roll - 0.5) * 0.06
             WHEN city_roll < 0.89 THEN 27.677 + (latitude_roll - 0.5) * 0.06
             ELSE 26.453 + (latitude_roll - 0.5) * 0.06 END,
-       CASE WHEN city_roll < 0.10 THEN 80.0 + longitude_roll * 8.3
+        CASE WHEN __WORST_CASE__ THEN 85.324 + (longitude_roll - 0.5) * 0.28
+             WHEN city_roll < 0.10 THEN 80.0 + longitude_roll * 8.3
             WHEN city_roll < 0.28 THEN 85.324 + (longitude_roll - 0.5) * 0.06
             WHEN city_roll < 0.46 THEN 85.325 + (longitude_roll - 0.5) * 0.05
             WHEN city_roll < 0.62 THEN 85.429 + (longitude_roll - 0.5) * 0.05
@@ -271,13 +276,14 @@ SELECT md5('rentra-load-listing-' || n::text)::uuid,
        (ARRAY['unfurnished', 'semi_furnished', 'fully_furnished'])[
            1 + floor(furnishing_roll * 3)::integer
        ],
-       CASE WHEN status_roll < 0.85 THEN 'active'
+        CASE WHEN __WORST_CASE__ THEN 'active'
+             WHEN status_roll < 0.85 THEN 'active'
             WHEN status_roll < 0.91 THEN 'archived'
             WHEN status_roll < 0.96 THEN 'rented' ELSE 'draft' END,
        created_at + status_time_roll * (now() - created_at),
        created_at,
        1 + floor(photo_roll * 5)::integer,
-       suspension_roll
+       CASE WHEN __WORST_CASE__ THEN 1 ELSE suspension_roll END
 FROM sampled_listings;
 
 UPDATE seed_listing_facts SET id = '__L1_UUID__'::uuid, city = 'Lalitpur', latitude = 27.6588,
@@ -422,6 +428,7 @@ def main() -> None:
     args = parser.parse_args()
 
     database_url = os.environ.get("TEST_DATABASE_URL", "")
+    worst_case = os.environ.get("SEED_WORST_CASE") == "1"
     if not database_url:
         raise SystemExit("TEST_DATABASE_URL is required")
     _require_local(database_url, "TEST_DATABASE_URL")
@@ -458,6 +465,19 @@ def main() -> None:
         sql = SEED_SQL.replace("__T1_UUID__", str(uuid.UUID(planted_t1_id)))
         sql = sql.replace("__L1_UUID__", str(uuid.UUID(L1_ID)))
         sql = sql.replace("__L2_UUID__", str(uuid.UUID(L2_ID)))
+        sql = sql.replace("__WORST_CASE__", "TRUE" if worst_case else "FALSE")
+        sql = sql.replace("__LISTING_COUNT__", "49999" if worst_case else "20000")
+        sql = sql.replace(
+            "__SAMPLED_RADIUS__",
+            "30" if worst_case else "CASE WHEN n % 6 = 0 THEN 10 + (n % 41) ELSE 5 END",
+        )
+        sql = sql.replace("__ATTRIBUTE_LIMIT__", "9" if worst_case else "CASE WHEN n <= 30000 THEN 3 + (n % 2) ELSE 9 END")
+        sql = sql.replace("__STANDARD_ATTR_SHAPE__", "FALSE" if worst_case else "chosen.n <= 30000")
+        sql = sql.replace("__ATTRIBUTE_USERS__", "TRUE" if worst_case else "users.n BETWEEN 10001 AND 50000")
+        sql = sql.replace(
+            "__NUMERIC_REQUIREMENT_FILTER__",
+            "TRUE" if worst_case else "users.n BETWEEN 30001 AND 50000",
+        )
         conn.execute(sql, prepare=False)
         conn.execute("SET session_replication_role = origin")
         for table in (
@@ -467,6 +487,40 @@ def main() -> None:
         ):
             conn.execute(f"ANALYZE {table}")
         _print_counts(conn)
+    if worst_case:
+        tenant_counts = conn.execute(
+            """
+            SELECT tenant.id, count(listing.id)::integer AS listing_count
+            FROM auth.users AS tenant
+            JOIN app.tenant_locations AS location ON location.user_id = tenant.id
+            LEFT JOIN app.listings AS listing
+              ON listing.status = 'active'
+             AND listing.suspended_at IS NULL
+             AND extensions.st_dwithin(
+                 listing.point, location.search_point, location.search_radius_km * 1000.0
+             )
+            WHERE tenant.email LIKE %s
+            GROUP BY tenant.id, tenant.email
+            ORDER BY tenant.email
+            LIMIT 5
+            """,
+            (MARKER,),
+        ).fetchall()
+        for tenant_id, listing_count in tenant_counts:
+            print(
+                f"Tenant {tenant_id}: {listing_count} active, non-suspended listings inside search circle",
+                flush=True,
+            )
+        total_listing_count = conn.execute(
+            """
+            SELECT count(*)
+            FROM app.listings AS listing
+            JOIN auth.users AS tenant ON tenant.id = listing.owner_id
+            WHERE tenant.email LIKE %s
+            """,
+            (MARKER,),
+        ).fetchone()[0]
+        print(f"Total listing count: {total_listing_count}", flush=True)
     conn.close()
 
     print(f"Seed duration: {time.perf_counter() - started:.2f}s")

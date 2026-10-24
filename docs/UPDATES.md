@@ -81,3 +81,13 @@ Append new entries at the bottom only; never edit or delete older entries. The b
 - Open items unchanged: wide-radius heavy tenants slow, GiST not selected at 20k, DBSCAN input cap unmeasured, load test and real-Supabase p95 in staging.
 - Not done: staging run, pre-launch items (spec section 15).
 - Commit hash: add in the next entry.
+
+## 2026-10-24: 30 km default and distance tiebreak
+- Docs sync commit hash: 26c8558.
+- Default search radius is now 30 km (was 5). Migration 20261024170000_default_search_radius_30.sql only sets the column default. Bounds stay 1 to 50. API default and fallback are 30. Existing tenants keep their saved radius.
+- Matching tiebreak order is now: score desc, nices met desc (only when musts exist), rent asc, distance asc, created_at desc, id. Migration 20261024180000_match_checks_distance.sql recreates app.match_checks with a distance_m column (sphere distance, used for ordering only, not returned by the API). Accuracy oracle updated to the same order.
+- New tests: default radius 30 plus DB default check, distance tiebreak before created_at.
+- seed_load.py: new opt-in SEED_WORST_CASE=1 (every tenant 30 km and 14 requirements, 49,999 generated listings plus L2 = 50,000, all active and unsuspended, all near the Kathmandu center). Unset behavior unchanged.
+- Full suite run by user on a clean reset: 235 passed, 7 skipped (opt-in tests), 212.81 s.
+- Not done: worst-case speed measurement (target 500 ms to 1 s), accuracy oracle on the worst-case seed, GiST proof, DBSCAN input cap decision.
+- Commit hash: add in the next entry.

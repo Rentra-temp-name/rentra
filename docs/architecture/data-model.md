@@ -18,7 +18,7 @@ Public profile contacts are returned only if the profile owns a listing with `st
 
 ### `app.tenant_locations`
 
-The tenant search point is rounded to a coarse grid before storage (never the exact location) and stored as a point plus radius, default 5 km, which the tenant can adjust. A listing's point must fall inside the search circle.
+The tenant search point is rounded to a coarse grid before storage (never the exact location) and stored as a point plus radius, default 30 km, which the tenant can adjust. A listing's point must fall inside the search circle.
 
 ## Registry
 
@@ -76,4 +76,4 @@ GiST was NOT selected by the planner at 20k listings locally (status index prefe
 
 ## Requirements and matching
 
-Each selected option is scored as a separate check, including each multi-choice must; an exclusive listing answer satisfies every pick for that attribute. Numeric matching uses rent as the tenant's maximum and bedrooms, bathrooms, `size_value` (sq ft), and `max_people` as tenant minimums. Score is must rows met / must rows total; with no musts, the score uses nice rows. Every must met is perfect and uncapped; ranked results are capped at 100. Ordering is score desc, nices met desc (only when musts exist), rent asc, created_at desc, id. Every ranked result names its misses. With no requirements, matching returns the daily md5 explore feed, keyset paginated, with a nudge flag.
+Each selected option is scored as a separate check, including each multi-choice must; an exclusive listing answer satisfies every pick for that attribute. Numeric matching uses rent as the tenant's maximum and bedrooms, bathrooms, `size_value` (sq ft), and `max_people` as tenant minimums. Score is must rows met / must rows total; with no musts, the score uses nice rows. Every must met is perfect and uncapped; ranked results are capped at 100. Ordering is score desc, nices met desc (only when musts exist), rent asc, distance asc, created_at desc, id. Every ranked result names its misses. With no requirements, matching returns the daily md5 explore feed, keyset paginated, with a nudge flag.

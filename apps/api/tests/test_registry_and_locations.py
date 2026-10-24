@@ -144,6 +144,34 @@ def test_me_locations_rounds_on_write_and_rejects_unknown_fields_without_echoing
     assert "90.1234" not in invalid.text
 
 
+def test_me_locations_defaults_radius_to_30_km(signed_in_user, test_database_url):
+    with TestClient(app) as client:
+        response = client.put(
+            "/me/locations",
+            headers=signed_in_user["headers"],
+            json={
+                "current_point": {"latitude": 27.72, "longitude": 85.32},
+                "search_point": {"latitude": 27.68, "longitude": 85.32},
+            },
+        )
+        assert response.status_code == 200, response.text
+        saved = client.get("/me/locations", headers=signed_in_user["headers"])
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["search_radius_km"] == 30.0
+
+    with psycopg.connect(test_database_url) as conn:
+        default_expr = conn.execute(
+            """SELECT pg_get_expr(attribute_default.adbin, attribute_default.adrelid)
+               FROM pg_attrdef AS attribute_default
+               JOIN pg_attribute AS attribute
+                 ON attribute.attrelid = attribute_default.adrelid
+                AND attribute.attnum = attribute_default.adnum
+               WHERE attribute_default.adrelid = 'app.tenant_locations'::regclass
+                 AND attribute.attname = 'search_radius_km'"""
+        ).fetchone()[0]
+    assert default_expr in {"30", "30::numeric"}
+
+
 def test_locations_are_isolated_by_owner_in_api_and_rls(signed_in_pair):
     user_a, user_b = signed_in_pair
     payload = {

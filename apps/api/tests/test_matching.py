@@ -231,6 +231,21 @@ def test_tiebreak_order_rent_created_at_then_id(db_conn, signed_in_pair):
     assert ids[:3] == [cheaper, newer, old]
 
 
+def test_tiebreak_order_distance_before_created_at(db_conn, signed_in_pair):
+    owner, tenant = prepare(db_conn, signed_in_pair)
+    closer_older = add_listing(
+        db_conn, owner, rent=20000, answers={"pets": ["yes"]}, created_days_ago=4
+    )
+    farther_newer = add_listing(
+        db_conn, owner, rent=20000, answers={"pets": ["yes"]},
+        longitude=POINT["lng"] + 0.02, created_days_ago=1,
+    )
+    db_conn.commit()
+    assert set_requirements(tenant, attributes={"pets": {"yes": "nice"}}).status_code == 200
+    ids = [row["id"] for row in get_matches(tenant).json()["perfect"]]
+    assert ids[:2] == [closer_older, farther_newer]
+
+
 def test_ranked_cap_100_and_perfect_uncapped(db_conn, signed_in_pair):
     owner, tenant = prepare(db_conn, signed_in_pair)
     perfect = [add_listing(db_conn, owner, answers={"pets": ["yes"]}) for _ in range(102)]

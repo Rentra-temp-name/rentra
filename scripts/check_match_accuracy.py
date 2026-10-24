@@ -181,7 +181,12 @@ def _oracle_rows(
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     attributes, numeric_requirements = _load_requirements(conn, user_id)
     listings = conn.execute(
-        """SELECT l.id, l.rent_amount, l.created_at
+        """SELECT l.id, l.rent_amount, l.created_at,
+                  extensions.st_distance(
+                      l.point,
+                      extensions.st_setsrid(extensions.st_makepoint(%s, %s), 4326)::extensions.geography,
+                      false
+                  )::float8 AS distance_m
            FROM app.listings AS l
            WHERE l.status = 'active'
              AND l.suspended_at IS NULL
@@ -191,7 +196,7 @@ def _oracle_rows(
                  extensions.st_setsrid(extensions.st_makepoint(%s, %s), 4326)::extensions.geography,
                  %s
              )""",
-        (user_id, lng, lat, radius_km * 1000.0),
+         (lng, lat, user_id, lng, lat, radius_km * 1000.0),
     ).fetchall()
     ids = [row["id"] for row in listings]
     answers: dict[Any, dict[Any, dict[str, Any]]] = defaultdict(lambda: defaultdict(lambda: {"options": set(), "exclusive": False}))
@@ -275,6 +280,7 @@ def _oracle_rows(
             "score": score,
             "nice_met": nice_total - nice_miss,
             "rent_amount": listing["rent_amount"],
+            "distance_m": listing["distance_m"],
             "created_at": listing["created_at"],
         }
     return oracle, attributes, numeric_requirements
@@ -337,7 +343,8 @@ def _compare_checks(
 def _sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
     created = row["created_at"]
     created_stamp = created.timestamp() if isinstance(created, datetime) else 0.0
-    return (-row["score"], -row["nice_met"], row["rent_amount"], -created_stamp, row["id"])
+    nice_tiebreak = -row["nice_met"] if row["must_total"] > 0 else 0
+    return (-row["score"], nice_tiebreak, row["rent_amount"], row["distance_m"], -created_stamp, row["id"])
 
 
 def _compare_final(

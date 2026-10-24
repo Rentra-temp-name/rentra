@@ -64,7 +64,7 @@ MATCHES_SQL = """WITH checks AS (
       FROM checks
     ), ordered AS (
       SELECT *,
-        row_number() OVER(PARTITION BY perfect_flag ORDER BY score DESC, CASE WHEN must_total>0 THEN nice_total-nice_miss ELSE 0 END DESC, rent_amount,created_at DESC,id) ranked_row,
+        row_number() OVER(PARTITION BY perfect_flag ORDER BY score DESC, CASE WHEN must_total>0 THEN nice_total-nice_miss ELSE 0 END DESC, rent_amount,distance_m,created_at DESC,id) ranked_row,
         current_date::text shuffle_day, md5(id::text||current_date::text) shuffle_key
       FROM scored
     ), page AS (
@@ -80,7 +80,7 @@ MATCHES_SQL = """WITH checks AS (
       ORDER BY CASE WHEN page.explore_flag THEN 2 ELSE 1 END,
         CASE WHEN page.explore_flag THEN page.shuffle_key END, page.score DESC,
         CASE WHEN page.must_total>0 THEN page.nice_total-page.nice_miss ELSE 0 END DESC,
-        page.rent_amount,page.created_at DESC,page.id"""
+        page.rent_amount,page.distance_m,page.created_at DESC,page.id"""
 
 
 class InProcessReadLimiter:
@@ -950,12 +950,12 @@ class TenantLocationsUpdate(BaseModel):
 
     current_point: LocationPointInput
     search_point: LocationPointInput
-    search_radius_km: float = Field(default=5, ge=1, le=50)
+    search_radius_km: float = Field(default=30, ge=1, le=50)
 
 
 def _location_response(row: tuple[Any, ...] | None) -> dict[str, Any]:
     if row is None:
-        return {"current_point": None, "search_point": None, "search_radius_km": 5.0}
+        return {"current_point": None, "search_point": None, "search_radius_km": 30.0}
     current_lat, current_lon, search_lat, search_lon, radius, created_at, updated_at = row
     return {
         "current_point": {"latitude": float(current_lat), "longitude": float(current_lon)},

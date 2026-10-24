@@ -188,6 +188,7 @@ async def limit_public_reads(request: Request, call_next):
             )
     is_write = request.method in {"POST", "PATCH", "DELETE", "PUT"} and (
         path == "/me/requirements" or
+        (path == "/me" and request.method == "DELETE") or
         path == "/listings" or (path.startswith("/listings/") and not path.endswith("/connect"))
     )
     is_read = request.method == "GET" and (
@@ -363,6 +364,12 @@ class ProfileUpdate(BaseModel):
         return self
 
 
+class AccountDeletionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    confirm: bool = Field(default=False, strict=True)
+
+
 def get_current_profile(
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
@@ -389,6 +396,12 @@ def get_current_profile(
                     (uid,),
                 )
                 row = cur.fetchone()
+    except psycopg.errors.ForeignKeyViolation:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "unauthorized", "message": "Invalid or missing bearer token"},
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from None
     except psycopg.Error as exc:
         raise HTTPException(status_code=503, detail="Profile storage unavailable") from exc
 
@@ -754,6 +767,43 @@ def update_me(
             raise HTTPException(status_code=404, detail="Profile not found")
         return profile_json(dict(zip(("id", "display_name", "whatsapp", "deletion_requested_at", "created_at"), row)))
     return profile_json(profile)
+
+
+@app.delete("/me", response_model=None)
+def delete_me(
+    profile: Annotated[dict[str, Any], Depends(get_current_profile)],
+    body: AccountDeletionRequest | None = None,
+) -> dict[str, bool] | JSONResponse:
+    if body is None or not body.confirm:
+        return JSONResponse(status_code=400, content={"code": "CONFIRM_REQUIRED"})
+    user_id = str(profile["id"])
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT set_config('app.user_id', %s, true)", (user_id,))
+                cur.execute("SELECT app.request_account_deletion()")
+            conn.commit()
+    except psycopg.Error as exc:
+        code = getattr(exc.diag, "message_primary", None)
+        if code in {"ACCOUNT_HAS_SUSPENDED_LISTING", "LISTING_SUSPENDED"}:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "code": "ACCOUNT_HAS_SUSPENDED_LISTING",
+                    "message": "Account cannot be deleted while a listing is suspended",
+                },
+            )
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "account_deletion_storage_unavailable", "message": "Account deletion unavailable"},
+        ) from None
+
+    result = _auth_delete_user(user_id)
+    if result in {"ok", "already_gone"}:
+        return {"deleted": True}
+    code = result if result in {"timeout", "network"} or re.fullmatch(r"http_[0-9]{3}", result or "") else "network"
+    logger.warning("account_deletion_auth_pending %s", code)
+    return JSONResponse(status_code=202, content={"status": "deletion_pending"})
 
 
 @app.get("/profiles/{profile_id}")
@@ -1165,6 +1215,28 @@ def _storage_headers(content_type: str | None = None) -> dict[str, str]:
         headers["Content-Type"] = content_type
         headers["x-upsert"] = "false"
     return headers
+
+
+def _auth_delete_user(user_id: str) -> str:
+    """Delete an Auth user without exposing credentials or identifiers in logs."""
+    try:
+        settings = get_settings()
+        response = httpx.delete(
+            f"{settings.SUPABASE_URL.rstrip('/')}/auth/v1/admin/users/{quote(user_id, safe='')}",
+            headers=_storage_headers(),
+            timeout=15,
+        )
+        if 200 <= response.status_code < 300:
+            return "ok"
+        if response.status_code == 404:
+            return "already_gone"
+        return f"http_{response.status_code}"
+    except httpx.TimeoutException:
+        return "timeout"
+    except httpx.RequestError:
+        return "network"
+    except Exception:
+        return "network"
 
 
 def _storage_object_url(path: str) -> str:

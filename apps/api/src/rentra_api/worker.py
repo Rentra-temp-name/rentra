@@ -12,6 +12,7 @@ import httpx
 import psycopg
 from psycopg.rows import dict_row
 
+from rentra_api import main as api_main
 from rentra_api.config import get_settings
 from rentra_api.main import PHOTO_BUCKET, _storage_headers, _storage_object_url
 
@@ -82,6 +83,29 @@ def run_once(batch_size: int = 50, deleter=delete_object) -> dict[str, int]:
     return counts
 
 
+def run_deletion_sweep(batch_size: int = 20, auth_deleter=None) -> dict[str, int]:
+    """Retry Auth deletion for accounts whose request has been pending."""
+    if auth_deleter is None:
+        auth_deleter = api_main._auth_delete_user
+    with _connect() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT user_id FROM app.list_stuck_account_deletions(%s)", (batch_size,))
+            rows = cur.fetchall()
+        conn.commit()
+
+    counts = {"found": len(rows), "done": 0, "failed": 0}
+    for row in rows:
+        try:
+            result = auth_deleter(str(row["user_id"]))
+        except Exception:
+            result = "network"
+        if result in {"ok", "already_gone"}:
+            counts["done"] += 1
+        else:
+            counts["failed"] += 1
+    return counts
+
+
 def main() -> None:
     stopping = threading.Event()
 
@@ -93,11 +117,12 @@ def main() -> None:
     while not stopping.is_set():
         try:
             counts = run_once()
+            deletion_counts = run_deletion_sweep()
         except Exception:
             print('{"error":"worker_cycle_failed"}', flush=True)
             stopping.wait(10)
             continue
-        print(json.dumps(counts, separators=(",", ":")), flush=True)
+        print(json.dumps({"storage": counts, "deletions": deletion_counts}, separators=(",", ":")), flush=True)
         if counts["claimed"] == 0:
             stopping.wait(10)
 

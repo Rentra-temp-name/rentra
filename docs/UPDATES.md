@@ -39,3 +39,13 @@ Append new entries at the bottom only; never edit or delete older entries. The b
 - Full suite run by user: 214 passed, 1 skipped (opt-in EXPLAIN test).
 - Not done: 9c (DELETE /me and account deletion sweep), 10. Next: 9c.
 - Commit hash: add in the 9c entry.
+
+## 2026-10-24: step 9c done, step 9 complete
+- 9b commit hash: 05082db.
+- DELETE /me: strict body {confirm}, missing or false returns 400 CONFIRM_REQUIRED. app.request_account_deletion() sets deletion_requested_at, queues storage and thumb paths, deletes the user's listings in one transaction, then the API calls the Auth admin API. Auth failure returns 202 deletion_pending and the worker sweep finishes it (run_deletion_sweep, users stuck over 5 minutes). Already deleted auth user counts as success.
+- PRODUCT RULE: a suspended listing stays in the database for legal work, so an account that owns any suspended listing cannot be deleted. DELETE /me returns 409 ACCOUNT_HAS_SUSPENDED_LISTING and changes nothing. The sweep skips such users too. The lifecycle trigger still guards the admin-suspends-mid-delete race.
+- Stale JWT of a deleted auth user gets 401 and never re-creates a profile.
+- Full suite run by user: 224 passed, 1 skipped (opt-in EXPLAIN test).
+- Known gaps: a user who requested deletion and then somehow got a listing suspended would stay pending (believed unreachable, since all their listings are deleted in the same transaction). Cron schedule is still unverified locally, verify in step 10 staging. A job error returns NULL so cron shows success, the step 10 last-success metric must read job_runs where error IS NULL.
+- Not done: 10. Next: step 10.
+- Commit hash: add in the step 10 entry.

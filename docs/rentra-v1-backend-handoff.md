@@ -101,7 +101,7 @@ Errors use stable codes where defined. Direct JSON responses return `{code, mess
 | `GET /listings` | none | keyset, page max 50, includes phone and point, same as detail |
 | `GET /listings/{id}` | none | full detail, includes phone and point. Returns `photos` ordered by position; each item has `id`, `position`, `width`, `height`, `original_url`, and `thumb_url`. |
 | `GET /map?bbox=&zoom=` | none | bbox and zoom required. Returns server-side clusters at low zoom and individual points at high zoom. Each cluster returns count and centroid. Individual points return id, lat, lng, rent only. Response is capped. [ENG] |
-| `GET/PUT /me`, `DELETE /me` | user | delete needs `{confirm:true}`. `PUT /me` with `whatsapp:null` or an empty string clears it; the API first returns `WHATSAPP_CLEAR_ARCHIVES_LISTINGS` with the active non-suspended listing count, then requires `{confirm:true}` to archive those listings and clear the number. |
+| `GET/PUT /me`, `DELETE /me` | user | delete needs `{confirm:true}`. `DELETE /me` returns 409 `ACCOUNT_HAS_SUSPENDED_LISTING` while a suspended listing exists, and 202 `deletion_pending` if the Auth API fails (the worker sweep retries). `PUT /me` with `whatsapp:null` or an empty string clears it; the API first returns `WHATSAPP_CLEAR_ARCHIVES_LISTINGS` with the active non-suspended listing count, then requires `{confirm:true}` to archive those listings and clear the number. |
 | `PUT /me/requirements`, `GET /matches` | user | Full replacement; active-registry validation, 20 writes/minute. Matches are one SQL query; perfect uncapped, ranked capped at 100, and empty requirements use keyset-paginated explore feed with nudge flag. |
 | `POST/DELETE /listings/{id}/save`, `GET /me/saved` | user |  |
 | `POST /listings/{id}/connect`, `GET /me/connections` | user | see section 7 |
@@ -137,7 +137,7 @@ Frontend URLs use `/rent/{slug}-{id}`. The API resolves by the trailing id. No s
 - Every job: `pg_try_advisory_xact_lock`, a `job_runs` row, one set-based statement, safe to run twice.
 - Purge runs in one transaction: insert the listing's photo paths into `storage_deletions`, then delete the listing. Children cascade.
 - A worker process (same image, separate command) drains `storage_deletions` with `FOR UPDATE SKIP LOCKED`, retries with backoff, and treats "already gone" as success. It also runs the account deletion sweep.
-- Account deletion is immediate on confirm. [PRODUCT] `DELETE /me`: set `deletion_requested_at`, purge owned listings (photos via outbox), delete the auth user through the Auth admin API (cascades the profile). The sweep retries anything stuck with `deletion_requested_at` set. Every authenticated request already loads the profile, and it rejects requests when `deletion_requested_at` is set, because an old JWT stays valid until it expires.
+- Account deletion is immediate on confirm. [PRODUCT] `DELETE /me`: set `deletion_requested_at`, purge owned listings (photos via outbox), delete the auth user through the Auth admin API (cascades the profile). The sweep retries anything stuck with `deletion_requested_at` set. Every authenticated request already loads the profile, and it rejects requests when `deletion_requested_at` is set, because an old JWT stays valid until it expires. An account that owns any suspended listing cannot be deleted (409 `ACCOUNT_HAS_SUSPENDED_LISTING`). Suspended listings stay in the database for legal work until an admin unsuspends them. [PRODUCT]
 - Reports keep a snapshot, so a user deleting their account does not erase the evidence.
 
 ## 9. Security rules
@@ -185,8 +185,7 @@ Boosted listings, reports on profiles, push notifications, Idempotency-Key table
 6. **Done.** Requirements and matching. `size_unit` is removed; `size_value` is square feet only.
 7. **Done.** Connect, notifications sidebar, and connection-scoped profile access.
 8. **Done.** Saved listings, reports, admin suspend, audit tables, and saved-listing change notifications.
-9. Jobs, outbox worker, account deletion.
-9a and 9b done (SQL jobs, outbox worker). 9c account deletion remains.
+9. Done. Jobs, outbox worker, account deletion.
 10. Observability, then a staging load test at 50k tenants and 20k listings with `EXPLAIN` checks. Prove real GiST index usage and log the DBSCAN clustering input cap risk. Targets: matches p95 300 ms, map p95 200 ms. [UNVERIFIED targets until measured]
 
 Every route in section 6 must have an owning build step.

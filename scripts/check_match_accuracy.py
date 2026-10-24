@@ -8,6 +8,7 @@ import random
 import statistics
 import sys
 import time
+import uuid
 from collections import defaultdict
 from datetime import datetime
 from decimal import Decimal
@@ -22,7 +23,8 @@ from rentra_api.main import MATCHES_SQL
 
 
 RANDOM_SEED = 42
-T1_ID = "479abdcd-c6ab-4137-a595-b77274916af0"
+T1_EMAIL = "planted-t1@seed.rentra.test"
+T1_ID = ""
 MATCH_TAIL = (None, None, None, None, 21)
 NUMERIC_FIELDS = {"rent_amount", "bedrooms", "bathrooms_total", "size_value", "max_people"}
 BUCKET_NAMES = (
@@ -34,6 +36,7 @@ BUCKET_NAMES = (
     "largest search radius",
 )
 _REPORT_LINES: list[str] = []
+_MISMATCH_PRINTED: dict[str, int] = defaultdict(int)
 
 
 def _print(*values: Any) -> None:
@@ -61,7 +64,7 @@ def _matches_params(conn: psycopg.Connection, user_id: str) -> tuple[object, ...
         lng, lat, radius_km = location
         lng, lat = float(lng), float(lat)
         radius_meters = float(radius_km) * 1000.0
-    return (user_id, lng, lat, radius_meters, *MATCH_TAIL)
+    return (user_id, lng, lat, radius_meters, *MATCH_TAIL, user_id)
 
 
 def _set_user(conn: psycopg.Connection, user_id: str) -> None:
@@ -163,9 +166,11 @@ def _select_tenants(
 
 def _load_requirements(conn: psycopg.Connection, user_id: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     attributes = conn.execute(
-        """SELECT r.attribute_id, r.option_id, r.importance, r.pick_rule, a.key AS label
+        """SELECT r.attribute_id, r.option_id, r.importance, r.pick_rule,
+                  a.key AS label, o.label::text AS value
            FROM app.requirements r
            JOIN app.attributes a ON a.id = r.attribute_id
+           JOIN app.attribute_options o ON o.id = r.option_id
            WHERE r.user_id = %s""",
         (user_id,),
     ).fetchall()
@@ -235,7 +240,7 @@ def _oracle_rows(
                 or answer["exclusive"]
             )
             if not met:
-                miss_labels.add(requirement["label"])
+                miss_labels.add(f"{requirement['label']}: {requirement['value']}")
                 if importance == "must":
                     must_miss += 1
                 else:
@@ -254,7 +259,7 @@ def _oracle_rows(
             else:
                 missed = values.get(field, 0) < requirement["value"]
             if missed:
-                miss_labels.add(field)
+                miss_labels.add(f"{field}: {field}")
                 if importance == "must":
                     must_miss += 1
                 else:
@@ -295,7 +300,9 @@ def _record(mismatches: list[dict[str, Any]], tenant: str, listing: str, field: 
         "got": got,
     }
     mismatches.append(mismatch)
-    _print_new_mismatches(tenant, [mismatch])
+    if _MISMATCH_PRINTED[field] < 20:
+        _print_new_mismatches(tenant, [mismatch])
+        _MISMATCH_PRINTED[field] += 1
 
 
 def _compare_checks(
@@ -326,9 +333,8 @@ def _compare_checks(
             "nice_miss": row[8],
             "must_total": row[9],
             "nice_total": row[10],
-            "miss_labels": {item["field"] for item in (row[11] or [])},
         }
-        for field in ("must_total", "nice_total", "must_miss", "nice_miss", "miss_labels"):
+        for field in ("must_total", "nice_total", "must_miss", "nice_miss"):
             if expected[field] != got[field]:
                 _record(
                     mismatches,
@@ -338,6 +344,47 @@ def _compare_checks(
                     sorted(expected[field]) if isinstance(expected[field], set) else expected[field],
                     sorted(got[field]) if isinstance(got[field], set) else got[field],
                 )
+
+
+def _sample_miss_ids(
+    tenant_id: str, oracle: dict[str, dict[str, Any]]
+) -> list[str]:
+    ranked_ids = [
+        listing_id
+        for listing_id, _row in sorted(
+            oracle.items(),
+            key=lambda item: _sort_key({**item[1], "id": item[0]}),
+        )[:100]
+    ]
+    random_pool = sorted(set(oracle) - set(ranked_ids))
+    tenant_random = random.Random(f"{RANDOM_SEED}:{tenant_id}")
+    random_ids = tenant_random.sample(random_pool, min(100, len(random_pool)))
+    return ranked_ids + random_ids
+
+
+def _compare_miss_labels(
+    tenant_id: str,
+    oracle: dict[str, dict[str, Any]],
+    sample_ids: list[str],
+    miss_rows: list[tuple],
+    mismatches: list[dict[str, Any]],
+) -> None:
+    actual = {
+        str(row[0]): {f"{item['field']}: {item['value']}" for item in (row[1] or [])}
+        for row in miss_rows
+    }
+    for listing_id in sample_ids:
+        expected = oracle[listing_id]["miss_labels"]
+        got = actual.get(listing_id, set())
+        if expected != got:
+            _record(
+                mismatches,
+                tenant_id,
+                listing_id,
+                "miss_labels",
+                sorted(expected),
+                sorted(got),
+            )
 
 
 def _sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
@@ -376,6 +423,64 @@ def _compare_final(
     outside = sorted(set(actual_ids) - set(oracle))
     if outside:
         _record(mismatches, tenant_id, "*", "explore_outside_radius", [], outside)
+
+
+def _check_tenant(
+    oracle_conn: psycopg.Connection,
+    api_conn: psycopg.Connection,
+    tenant_id: str,
+    tenant: dict[str, Any],
+    mismatches: list[dict[str, Any]],
+) -> tuple[float, int, float]:
+    tenant_started = time.perf_counter()
+    with api_conn.transaction():
+        _set_user(api_conn, tenant_id)
+        params = _matches_params(api_conn, tenant_id)
+        started = time.perf_counter()
+        final_rows = api_conn.execute(MATCHES_SQL, params).fetchall()
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        check_rows = api_conn.execute(
+            "SELECT * FROM app.match_checks(%s, %s, %s, %s)", params[:4]
+        ).fetchall()
+
+    attributes_count = len(tenant["attributes"])
+    numeric_count = len(tenant["numeric"])
+    all_rows = [*tenant["attributes"], *tenant["numeric"]]
+    must_count = sum(row["importance"] == "must" for row in all_rows)
+    nice_count = sum(row["importance"] == "nice" for row in all_rows)
+    _TIMING_META[tenant_id] = {
+        "total": attributes_count + numeric_count,
+        "must": must_count,
+        "nice": nice_count,
+        "radius_km": tenant["radius_km"],
+    }
+
+    oracle, _attrs, _nums = _oracle_rows(
+        oracle_conn,
+        tenant_id,
+        tenant["lng"],
+        tenant["lat"],
+        tenant["radius_km"],
+    )
+    _compare_checks(tenant_id, oracle, check_rows, mismatches)
+
+    sample_ids = _sample_miss_ids(tenant_id, oracle)
+    with api_conn.transaction():
+        _set_user(api_conn, tenant_id)
+        miss_rows = api_conn.execute(
+            "SELECT listing_id, misses FROM app.match_misses(%s, %s::uuid[])",
+            (tenant_id, [uuid.UUID(listing_id) for listing_id in sample_ids]),
+        ).fetchall()
+    _compare_miss_labels(tenant_id, oracle, sample_ids, miss_rows, mismatches)
+
+    _compare_final(
+        tenant_id,
+        oracle,
+        final_rows,
+        mismatches,
+        bool(tenant["attributes"] or tenant["numeric"]),
+    )
+    return elapsed_ms, len(oracle), (time.perf_counter() - tenant_started) * 1000.0
 
 
 def _timing_summary(timings: list[tuple[str, float]]) -> None:
@@ -426,7 +531,10 @@ def _print_new_mismatches(tenant_id: str, new_mismatches: list[dict[str, Any]]) 
 
 
 def main() -> None:
+    global T1_ID
+
     _REPORT_LINES.clear()
+    _MISMATCH_PRINTED.clear()
     random.seed(RANDOM_SEED)
     _print(f"Random seed: {RANDOM_SEED}")
     limit_text = os.environ.get("ACCURACY_LIMIT")
@@ -451,6 +559,12 @@ def main() -> None:
     started_all = time.perf_counter()
     tenant_wall_times: list[float] = []
     with psycopg.connect(superuser_url, row_factory=dict_row) as oracle_conn:
+        planted_t1 = oracle_conn.execute(
+            "SELECT id FROM auth.users WHERE email = %s", (T1_EMAIL,)
+        ).fetchone()
+        if planted_t1 is None:
+            raise SystemExit("Planted T1 user was not found")
+        T1_ID = str(planted_t1["id"])
         tenants, buckets = _load_tenants(oracle_conn)
         selected, coverage = _select_tenants(tenants, buckets, limit)
         _print(f"Tenants selected: {len(selected)}")
@@ -461,46 +575,27 @@ def main() -> None:
         with psycopg.connect(settings.DATABASE_URL) as api_conn:
             for completed, tenant_id in enumerate(selected, start=1):
                 tenant_started = time.perf_counter()
-                tenant = tenants[tenant_id]
-                with api_conn.transaction():
-                    _set_user(api_conn, tenant_id)
-                    params = _matches_params(api_conn, tenant_id)
-                    started = time.perf_counter()
-                    final_rows = api_conn.execute(MATCHES_SQL, params).fetchall()
-                    elapsed_ms = (time.perf_counter() - started) * 1000.0
-                    check_rows = api_conn.execute(
-                        "SELECT * FROM app.match_checks(%s, %s, %s, %s)", params[:4]
-                    ).fetchall()
-                timings.append((tenant_id, elapsed_ms))
-                attributes_count = len(tenant["attributes"])
-                numeric_count = len(tenant["numeric"])
-                all_rows = [*tenant["attributes"], *tenant["numeric"]]
-                must_count = sum(row["importance"] == "must" for row in all_rows)
-                nice_count = sum(row["importance"] == "nice" for row in all_rows)
-                _TIMING_META[tenant_id] = {
-                    "total": attributes_count + numeric_count,
-                    "must": must_count,
-                    "nice": nice_count,
-                    "radius_km": tenant["radius_km"],
-                }
-
-                oracle, _attrs, _nums = _oracle_rows(
-                    oracle_conn,
-                    tenant_id,
-                    tenant["lng"],
-                    tenant["lat"],
-                    tenant["radius_km"],
-                )
-                total_listings_compared += len(oracle)
-                _compare_checks(tenant_id, oracle, check_rows, mismatches)
-                _compare_final(
-                    tenant_id,
-                    oracle,
-                    final_rows,
-                    mismatches,
-                    bool(tenant["attributes"] or tenant["numeric"]),
-                )
-                tenant_ms = (time.perf_counter() - tenant_started) * 1000.0
+                try:
+                    with oracle_conn.transaction():
+                        elapsed_ms, compared, tenant_ms = _check_tenant(
+                            oracle_conn,
+                            api_conn,
+                            tenant_id,
+                            tenants[tenant_id],
+                            mismatches,
+                        )
+                    timings.append((tenant_id, elapsed_ms))
+                    total_listings_compared += compared
+                except Exception as exc:
+                    tenant_ms = (time.perf_counter() - tenant_started) * 1000.0
+                    _record(
+                        mismatches,
+                        tenant_id,
+                        "*",
+                        "tenant_error",
+                        "completed",
+                        type(exc).__name__,
+                    )
                 tenant_wall_times.append(tenant_ms)
                 if completed % 5 == 0:
                     elapsed_s = time.perf_counter() - started_all
@@ -515,10 +610,14 @@ def main() -> None:
     _print(f"Tenants checked: {len(selected)}")
     _print(f"Listings compared: {total_listings_compared}")
     _print(f"Mismatch count: {len(mismatches)}")
-    _print("First 10 mismatches:")
-    for mismatch in mismatches[:10]:
-        _print(mismatch)
-    _timing_summary(timings)
+    _print("Mismatch counts by field:")
+    mismatch_counts: dict[str, int] = defaultdict(int)
+    for mismatch in mismatches:
+        mismatch_counts[mismatch["field"]] += 1
+    for field, count in sorted(mismatch_counts.items()):
+        _print(f"  {field}: {count}")
+    if timings:
+        _timing_summary(timings)
     total_elapsed = time.perf_counter() - started_all
     _print(f"FINISHED | total elapsed: {total_elapsed:.1f}s | total mismatches: {len(mismatches)}")
     output_path = os.environ.get("ACCURACY_OUT") or "accuracy_out.txt"

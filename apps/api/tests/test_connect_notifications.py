@@ -138,7 +138,7 @@ def test_connect_creates_both_notifications_atomically(db_conn, signed_in_pair):
            BEFORE INSERT ON app.notifications
            FOR EACH ROW EXECUTE FUNCTION app.test_fail_profile_notification()"""
     )
-    db_conn.execute(f"GRANT USAGE, SELECT ON SEQUENCE app.{marker_sequence} TO rentra_api")
+    db_conn.execute(f"GRANT USAGE, SELECT ON SEQUENCE app.{marker_sequence} TO rentra_api, postgres")
     db_conn.commit()
     try:
         with TestClient(app) as client:

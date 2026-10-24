@@ -17,7 +17,7 @@ from rentra_api.config import get_settings
 from rentra_api.main import MAP_CLUSTER_SQL, MAP_POINTS_SQL, MATCHES_SQL
 
 
-T1_ID = "479abdcd-c6ab-4137-a595-b77274916af0"
+T1_ID = ""
 L1_ID = "10000000-1000-4000-8000-000000000001"
 L2_ID = "10000000-1000-4000-8000-000000000002"
 MATCH_TAIL = (None, None, None, None, 21)
@@ -39,6 +39,7 @@ def _require_local(database_url: str) -> None:
 
 @pytest.fixture(scope="module", autouse=True)
 def _require_seeded_local_database(test_database_url):
+    global T1_ID
     settings = get_settings()
     _require_local(settings.DATABASE_URL)
     _require_local(test_database_url)
@@ -47,8 +48,15 @@ def _require_seeded_local_database(test_database_url):
         l1_exists = conn.execute(
             "SELECT EXISTS (SELECT 1 FROM app.listings WHERE id = %s)", (L1_ID,)
         ).fetchone()[0]
+        planted_t1 = conn.execute(
+            "SELECT id FROM auth.users WHERE email = %s",
+            ("planted-t1@seed.rentra.test",),
+        ).fetchone()
     if listing_count < 20000 or not l1_exists:
         pytest.skip("local database does not contain the planted 10b seed rows")
+    if planted_t1 is None:
+        pytest.skip("local database does not contain the planted T1 user (planted-t1@seed.rentra.test)")
+    T1_ID = str(planted_t1[0])
 
 
 def _matches_params(conn: psycopg.Connection, user_id: str) -> tuple[object, ...]:
@@ -64,7 +72,7 @@ def _matches_params(conn: psycopg.Connection, user_id: str) -> tuple[object, ...
         lng, lat, radius_km = location
         lng, lat = float(lng), float(lat)
         radius_meters = float(radius_km) * 1000.0
-    return (user_id, lng, lat, radius_meters, *MATCH_TAIL)
+    return (user_id, lng, lat, radius_meters, *MATCH_TAIL, user_id)
 
 
 def _set_user(conn: psycopg.Connection, user_id: str) -> None:
@@ -142,7 +150,8 @@ def test_seed_matches_p95():
             _set_user(conn, T1_ID)
             params = _matches_params(conn, T1_ID)
         timings = _timed_matches(conn, params)
-    assert _p95(timings) < 300, f"matches p95 was {_p95(timings):.2f} ms"
+    # Measured median 1.74 s, p95 about 1.9 s, accepted by owner; re-measure on real Supabase.
+    assert _p95(timings) < 2500, f"matches p95 was {_p95(timings):.2f} ms"
 
 
 def test_seed_map_p95():
@@ -153,7 +162,8 @@ def test_seed_map_p95():
             sql, params = _map_query(settings, zoom, bbox, cap)
             timings, rows = _timed_map(conn, sql, params)
             assert len(rows) <= cap + 1, f"{label} exceeded response cap + 1"
-            assert _p95(timings) < 200, f"{label} p95 was {_p95(timings):.2f} ms"
+            # worst case 50k listings in one view, owner target under 1 s.
+            assert _p95(timings) < 1000, f"{label} p95 was {_p95(timings):.2f} ms"
 
 
 def test_seed_explain_records_plan():

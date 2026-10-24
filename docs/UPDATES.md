@@ -91,3 +91,17 @@ Append new entries at the bottom only; never edit or delete older entries. The b
 - Full suite run by user on a clean reset: 235 passed, 7 skipped (opt-in tests), 212.81 s.
 - Not done: worst-case speed measurement (target 500 ms to 1 s), accuracy oracle on the worst-case seed, GiST proof, DBSCAN input cap decision.
 - Commit hash: add in the next entry.
+
+## 2026-10-24: step 6 matches speed fix (lean match_checks)
+- Previous commit hash: c7d6aef (30 km default, distance tiebreak, worst-case seed mode).
+- New migration `20261024200000_match_checks_lean.sql`: `app.match_checks` keeps its 4-arg signature and 13 columns but returns misses as `'[]'` by design. New `app.match_misses(p_uid, p_listing_ids uuid[])` fills misses for the final page rows only. Both are SECURITY DEFINER, have the MATCH_USER_MISMATCH guard, and are granted to `rentra_api` only. `MATCHES_SQL` in `main.py` has a `final_page` CTE and a LEFT JOIN to `match_misses`.
+- Worst case (50,000 listings in the circle, every tenant 30 km, 14 requirements): median went from about 4.5 s to about 1.74 s, p95 about 1.83 to 1.9 s. ACCEPTED by the owner. The original target under 1 s was loosened. Worst case 1.7 s, re-measure on real Supabase. Typical tenants stay about 190 ms on the 20k seed.
+- Accuracy oracle on the worst-case seed: 30 tenants, 1,454,513 listings compared, 0 mismatches. Coverage gap: the seed has no tenants for the "only nice rows" and "multi-choice must / all_allowed exclusive" branches, so those are covered by pytest only.
+- Map at 50k: valley view median 371 ms, p95 456 ms; mid zoom median 30 ms, p95 36 ms; street level median 2.7 ms, p95 3.4 ms. Map target is anything under 1 s. GiST not used (staging item).
+- Seed perf tests (`SEED_PERF=1`): 5 passed. Limits: matches p95 2500 ms, map p95 1000 ms.
+- Full suite on a clean reset: 237 passed, 7 skipped.
+- New tests: ranked misses show only must labels when musts exist (existing behavior, nice misses hidden); multi-answer listing does not miss a selected option, with a bachelors-only control listing.
+- Test fix: `test_connect_creates_both_notifications_atomically` now grants the marker sequence to `rentra_api` and `postgres`, because `connect_listing` is SECURITY DEFINER owned by `postgres`. Why this test was green on the earlier clean run is unexplained.
+- Plans B (numeric rewrite) and C (answers rewrite) gave no speedup, kept because results are verified equal. The real cost inside `match_checks` was never isolated.
+- Open items: GiST proof, load test with many users, real-Supabase p95, worst-case 1.7 s re-measure, DBSCAN input cap unmeasured, pooler test skipped (needs `TEST_POOLER_DATABASE_URL`), Docker image build not verified, Sentry untested with a real DSN, cron schedule unverified locally.
+- Not pushed. Commit hash: add in the next entry.

@@ -117,7 +117,7 @@ def test_explain_matches_query(test_database_url, signed_in_pair):
         params = (
             tenant["id"],
             float(lng), float(lat), float(radius_km) * 1000.0,
-            None, None, None, None, 20 + 1,
+            None, None, None, None, 20 + 1, tenant["id"],
         )
         plan = explain_conn.execute(
             "EXPLAIN (ANALYZE, BUFFERS) " + MATCHES_SQL,

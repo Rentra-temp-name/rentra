@@ -186,7 +186,7 @@ Boosted listings, reports on profiles, push notifications, Idempotency-Key table
 7. **Done.** Connect, notifications sidebar, and connection-scoped profile access.
 8. **Done.** Saved listings, reports, admin suspend, audit tables, and saved-listing change notifications.
 9. Done. Jobs, outbox worker, account deletion.
-10. **Done with open items.** Observability (10a) is done. Scale check (10b): matches p95 about 220 to 246 ms for typical tenants (target 300 ms, met); map p95 134 ms zoomed out, 48 ms mid zoom, and 4 ms street level (target 200 ms, met); accuracy oracle: 600 tenants, 0 mismatches; full suite: 233 passed, 7 skipped on a clean reset. Open: wide-radius heavy tenants take 700 to 880 ms; load test and real-Supabase p95 remain for staging; DBSCAN input cap at Nepal-wide zoom is unmeasured.
+10. **Done with open items.** Observability (10a) is done. Scale check (10b): matches p95 about 220 to 246 ms for typical tenants (target 300 ms, met); map p95 134 ms zoomed out, 48 ms mid zoom, and 4 ms street level (target 200 ms, met); accuracy oracle on the worst-case seed: 30 tenants, 1,454,513 listings compared, 0 mismatches; full suite: 237 passed, 7 skipped on a clean reset. Worst-case matches (50,000 listings in the circle, 14 requirements) median about 1.7 s, accepted by the owner, re-measure on real Supabase. Open: GiST proof; load test with many users; real-Supabase p95; worst-case 1.7 s re-measure; DBSCAN input cap unmeasured; pooler test skipped (needs `TEST_POOLER_DATABASE_URL`); Docker image build not verified; Sentry untested with a real DSN; cron schedule unverified locally.
 
 Every route in section 6 must have an owning build step.
 

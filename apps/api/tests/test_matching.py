@@ -101,6 +101,18 @@ def test_nice_only_miss_is_named(db_conn, signed_in_pair):
     assert ranked["misses"] == ["pets: yes"]
 
 
+def test_ranked_misses_show_only_must_labels_when_musts_exist(db_conn, signed_in_pair):
+    owner, tenant = prepare(db_conn, signed_in_pair)
+    missed = add_listing(db_conn, owner)
+    db_conn.commit()
+    assert set_requirements(tenant, attributes={
+        "pets": {"yes": "must"}, "tenant_type": {"family": "nice"},
+    }).status_code == 200
+    ranked = next(row for row in get_matches(tenant).json()["ranked"] if row["listing"]["id"] == missed)
+    # nice misses are hidden when the tenant has musts (existing behavior)
+    assert set(ranked["misses"]) == {"pets: yes"}
+
+
 def test_matching_ranks_by_fraction_of_must_rows(db_conn, signed_in_pair):
     owner, tenant = prepare(db_conn, signed_in_pair)
     one_of_two = add_listing(db_conn, owner, answers={"pets": ["yes"]})
@@ -137,6 +149,22 @@ def test_multichoice_must_checks_each_pick_and_all_allowed_is_generic(db_conn, s
     result = get_matches(tenant).json()
     assert exclusive in [r["id"] for r in result["perfect"]]
     assert next(r for r in result["ranked"] if r["listing"]["id"] == partial)["misses"] == ["tenant_type: family"]
+
+
+def test_multi_answer_listing_does_not_miss_a_selected_option(db_conn, signed_in_pair):
+    owner, tenant = prepare(db_conn, signed_in_pair)
+    listing_id = add_listing(db_conn, owner, answers={"tenant_type": ["bachelors", "family"]})
+    partial = add_listing(db_conn, owner, answers={"tenant_type": ["bachelors"]})
+    db_conn.commit()
+    assert set_requirements(tenant, attributes={"tenant_type": {"family": "must"}}).status_code == 200
+    db_conn.execute("SELECT set_config('app.user_id', %s, true)", (tenant["id"],))
+    rows = db_conn.execute(
+        "SELECT listing_id::text, misses FROM app.match_misses(%s, %s::uuid[])",
+        (tenant["id"], [listing_id, partial]),
+    ).fetchall()
+    by_listing = {row[0]: row[1] for row in rows}
+    assert "tenant_type" not in {m["field"] for m in by_listing.get(listing_id, [])}
+    assert "tenant_type" in {m["field"] for m in by_listing[partial]}
 
 
 @pytest.mark.parametrize("field,listing_value,tenant_value,expected_perfect", [

@@ -71,12 +71,15 @@ MATCHES_SQL = """WITH checks AS (
       SELECT ordered.*, row_number() OVER(PARTITION BY explore_flag ORDER BY shuffle_key,id) explore_page_row
       FROM ordered
       WHERE (%s::date IS NULL OR (explore_flag AND shuffle_day=%s AND (shuffle_key,id)>(%s,%s::uuid)) OR NOT explore_flag)
-    ) SELECT page.id,page.title,page.rent_amount,page.lat,page.lng,p.whatsapp,page.created_at,page.misses,page.perfect_flag,page.explore_flag,page.must_total,page.nice_total,
-      (SELECT coalesce(jsonb_agg(jsonb_build_object('id',ph.id,'position',ph.position,'width',ph.width,'height',ph.height,'storage_path',ph.storage_path,'thumb_path',ph.thumb_path) ORDER BY ph.position),'[]'::jsonb) FROM app.listing_photos ph WHERE ph.listing_id=page.id),
-      page.shuffle_day,page.shuffle_key
-      FROM page CROSS JOIN LATERAL app.get_public_profile(page.owner_id) p
+    ), final_page AS (
+      SELECT * FROM page
       WHERE (NOT page.explore_flag OR page.explore_page_row<=%s)
         AND (page.explore_flag OR page.perfect_flag OR page.ranked_row<=100)
+    ) SELECT page.id,page.title,page.rent_amount,page.lat,page.lng,p.whatsapp,page.created_at,coalesce(mm.misses,'[]'::jsonb) AS misses,page.perfect_flag,page.explore_flag,page.must_total,page.nice_total,
+      (SELECT coalesce(jsonb_agg(jsonb_build_object('id',ph.id,'position',ph.position,'width',ph.width,'height',ph.height,'storage_path',ph.storage_path,'thumb_path',ph.thumb_path) ORDER BY ph.position),'[]'::jsonb) FROM app.listing_photos ph WHERE ph.listing_id=page.id),
+      page.shuffle_day,page.shuffle_key
+      FROM final_page page CROSS JOIN LATERAL app.get_public_profile(page.owner_id) p
+      LEFT JOIN app.match_misses(%s, ARRAY(SELECT id FROM final_page)) mm ON mm.listing_id=page.id
       ORDER BY CASE WHEN page.explore_flag THEN 2 ELSE 1 END,
         CASE WHEN page.explore_flag THEN page.shuffle_key END, page.score DESC,
         CASE WHEN page.must_total>0 THEN page.nice_total-page.nice_miss ELSE 0 END DESC,
@@ -2380,7 +2383,7 @@ def read_matches(
             rows = conn.execute(
                 sql,
                 (uid, lng, lat, radius_meters, cursor_day, cursor_day,
-                 cursor_hash, cursor_id, page_size + 1),
+                 cursor_hash, cursor_id, page_size + 1, uid),
             ).fetchall()
     except psycopg.Error as exc:
         exception_name = re.sub(r"[^a-z0-9_]", "_", type(exc).__name__.lower())

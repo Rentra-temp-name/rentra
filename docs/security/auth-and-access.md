@@ -11,7 +11,7 @@ Status: current V1 access rules follow [`rentra-v1-backend-handoff.md`](../rentr
 ## Principals and modes
 
 - **Visitor:** not signed in; can browse public listings, view listing details, and use the map.
-- **User:** signed in; can manage their profile, requirements, saved listings, connections, and notifications, and can create and manage listings they own.
+- **User:** signed in; can manage their profile, requirements, saved listings, connections, and notifications, and can create and manage listings they own. `DELETE /me` returns `409 ACCOUNT_HAS_SUSPENDED_LISTING` while the user owns a suspended listing, and `202 deletion_pending` if the Auth API fails (the worker sweep retries).
 - **Admin:** a user listed in `app.admins`; can perform user actions plus the handoff's audited admin actions.
 
 Tenant and landlord are switchable user modes, not stored roles. Switching modes does not delete either side's data. There is no user-suspension role or flag in V1.
@@ -42,7 +42,7 @@ Photo reads are available in public-visible listing detail and the owner's detai
 
 Admin routes check `app.admins` on each request. Admins can suspend/unsuspend listings and resolve reports; each action is recorded in `app.admin_actions`. Non-admins receive the same 404 response as an unknown route. Legal-order data access requires an order reference and a `legal_access_log` entry.
 
-Clearing WhatsApp requires explicit confirmation and archives the owner's active, non-suspended listings in the same transaction. An active suspended listing blocks the clear; a database profile trigger rejects direct clears while any active listing exists, including suspended listings. Restore of a previously active listing and reactivation without WhatsApp return `WHATSAPP_REQUIRED`. Suspended listings cannot be changed, archived, restored, or deleted by their owner; jobs skip them. Archived listings can be restored or force-deleted before the 30-day purge.
+Clearing WhatsApp requires explicit confirmation and archives the owner's active, non-suspended listings in the same transaction. An active suspended listing blocks the clear; a database profile trigger rejects direct clears while any active listing exists, including suspended listings. Restore of a previously active listing and reactivation without WhatsApp return `WHATSAPP_REQUIRED`. Suspended listings cannot be changed, archived, restored, or deleted by their owner; jobs skip them. Archived listings can be restored or force-deleted before the 30-day purge. `PUT /me` with a cleared WhatsApp first returns `WHATSAPP_CLEAR_ARCHIVES_LISTINGS` with the active non-suspended listing count; the client must then send `{confirm:true}` to archive those listings and clear the number.
 
 ## Database enforcement
 

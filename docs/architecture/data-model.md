@@ -18,7 +18,7 @@ Public profile contacts are returned only if the profile owns a listing with `st
 
 ### `app.tenant_locations`
 
-Stores current and search points as coarse `geography(Point, 4326)` values and a search radius. Both points are checked against the Nepal bounds and coarse grid. Matching uses the search point and radius.
+The tenant search point is rounded to a coarse grid before storage (never the exact location) and stored as a point plus radius, default 5 km, which the tenant can adjust. A listing's point must fall inside the search circle.
 
 ## Registry
 
@@ -64,7 +64,7 @@ Publicly visible listings' answers, numeric values, and photo metadata are reada
 - Partial `listings(archived_at)` where status is archived
 - Child-side indexes for foreign keys
 
-Location matching uses the listing point and the tenant search point/radius. Real GiST usage is proven by the step 10 load test at 20k listings.
+GiST was NOT selected by the planner at 20k listings locally (status index preferred). Speed targets met without it. Revisit in staging.
 
 ## Other application tables
 
@@ -76,4 +76,4 @@ Location matching uses the listing point and the tenant search point/radius. Rea
 
 ## Requirements and matching
 
-Each selected option is scored as a separate check, including each multi-choice must; an exclusive listing answer satisfies every pick for that attribute. Numeric matching uses rent as the tenant's maximum and bedrooms, bathrooms, `size_value` (sq ft), and `max_people` as tenant minimums. Must rows determine the score when present; otherwise nice rows do. Every must met is perfect. With no musts, a ranked item's misses name missed nice rows; when musts exist, misses name missed must rows only. With no requirements, matching returns the daily shuffled explore feed.
+Each selected option is scored as a separate check, including each multi-choice must; an exclusive listing answer satisfies every pick for that attribute. Numeric matching uses rent as the tenant's maximum and bedrooms, bathrooms, `size_value` (sq ft), and `max_people` as tenant minimums. Score is must rows met / must rows total; with no musts, the score uses nice rows. Every must met is perfect and uncapped; ranked results are capped at 100. Ordering is score desc, nices met desc (only when musts exist), rent asc, created_at desc, id. Every ranked result names its misses. With no requirements, matching returns the daily md5 explore feed, keyset paginated, with a nudge flag.

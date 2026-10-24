@@ -28,7 +28,7 @@ Status: partially decided. Items marked "Open" need a decision.
 ## App after login (sidebar)
 
 - **Home** with three sections:
-  - For You: perfect and ranked listings matched to the user's requirements
+  - For You: perfect and ranked listings matched to the user's requirements, ranked by must fraction; perfect matches are uncapped, ranked results are capped at 100, and each miss is named. With no requirements, the user sees a daily explore feed and a nudge.
   - Explore: listings shuffled once a day
   - Saved: favorited listings
 - **Notifications:** connection activity and changes to saved listings
@@ -44,7 +44,7 @@ Users can save or unsave listings. They can connect only to another user's publi
 
 Users can report another user's listing. Admins review reports, resolve them with an optional audit note, and suspend or unsuspend listings. These actions are audited.
 
-Clearing WhatsApp in the profile requires confirmation. Active, non-suspended listings are archived in the same transaction as the clear; if an active suspended listing exists, the clear is blocked. Direct database clears are also blocked while any listing is active. Restoring a listing that was active, and reactivating, require WhatsApp.
+Clearing WhatsApp in the profile requires confirmation. Active, non-suspended listings are archived in the same transaction as the clear; if an active suspended listing exists, the clear is blocked. Direct database clears are also blocked while any listing is active. Restoring a listing that was active, and reactivating, require WhatsApp. `PUT /me` with a cleared WhatsApp first returns `WHATSAPP_CLEAR_ARCHIVES_LISTINGS` with the active non-suspended listing count; the client must then send `{confirm:true}` to archive those listings and clear the number.
 
 ## Page map
 

@@ -74,3 +74,10 @@ Append new entries at the bottom only; never edit or delete older entries. The b
 - Step 10 is done with logged open items, not fully sealed.
 - Not done: sync data-model.md, overview.md, auth-and-access.md, user-flows.md. Spec sections 13 and 15 were updated for step 10 and GiST.
 - Commit hash: add in the next entry.
+
+## 2026-10-24: docs synced to handoff
+- Step 10b commit hash: 72b36ef.
+- data-model.md, overview.md, auth-and-access.md, user-flows.md synced to the handoff (tenant location grid and radius, GiST claim corrected, matching rules, WhatsApp clear flow, account deletion codes).
+- Open items unchanged: wide-radius heavy tenants slow, GiST not selected at 20k, DBSCAN input cap unmeasured, load test and real-Supabase p95 in staging.
+- Not done: staging run, pre-launch items (spec section 15).
+- Commit hash: add in the next entry.

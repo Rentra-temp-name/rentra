@@ -23,3 +23,11 @@ Append new entries at the bottom only; never edit or delete older entries. The b
   (the skipped one is the opt-in EXPLAIN test, EXPLAIN_MATCHES=1).
 - Local EXPLAIN at 300 listings: about 20 ms execution, sane plan. This is a sanity check only. Step 10 must prove GiST use for st_dwithin at 20k listings, and watch the RLS subplans and the get_public_profile per-row call.
 - Done: steps 1-8 and polish. Not done: 9, 10. Next: step 9.
+
+## 2026-10-24: step 9a done
+- SQL jobs: job_runs and storage_deletions tables, three job functions (archive stale, purge archived, purge abandoned drafts), guarded pg_cron schedule, force_delete_listing now also queues thumb paths, purge queues paths only for rows actually deleted.
+- Full suite run by user: 207 passed, 1 skipped (opt-in EXPLAIN test).
+- Cron schedule is guarded and unverified locally. Verify in step 10 staging.
+- A job error returns NULL, so cron shows success. The step 10 last-success metric must read job_runs where error IS NULL.
+- Not done: 9b (outbox worker), 9c (DELETE /me and deletion sweep), 10. Next: 9b.
+- Commit hash: fill in after commit.

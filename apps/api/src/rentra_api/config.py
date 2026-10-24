@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     MAP_RESPONSE_CAP: int = Field(default=500, ge=1)
     MAP_CLUSTER_ZOOM: float = Field(default=10.0, ge=0, le=22)
     TRUSTED_PROXY_CIDRS: str = ""
+    LOG_LEVEL: str = "INFO"
+    ENV: str = "development"
+    SERVICE_VERSION: str = "0.1.0"
+    SENTRY_DSN: Optional[str] = None
+    METRICS_TOKEN: Optional[str] = None
 
     @field_validator(
         "DATABASE_URL",

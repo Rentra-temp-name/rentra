@@ -15,6 +15,7 @@ from psycopg.rows import dict_row
 from rentra_api import main as api_main
 from rentra_api.config import get_settings
 from rentra_api.main import PHOTO_BUCKET, _storage_headers, _storage_object_url
+from rentra_api.logging_setup import setup_logging
 
 
 def _bucket_object_url(bucket: str, path: str) -> str:
@@ -107,6 +108,7 @@ def run_deletion_sweep(batch_size: int = 20, auth_deleter=None) -> dict[str, int
 
 
 def main() -> None:
+    setup_logging()
     stopping = threading.Event()
 
     def request_stop(_signum, _frame):

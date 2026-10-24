@@ -49,3 +49,11 @@ Append new entries at the bottom only; never edit or delete older entries. The b
 - Known gaps: a user who requested deletion and then somehow got a listing suspended would stay pending (believed unreachable, since all their listings are deleted in the same transaction). Cron schedule is still unverified locally, verify in step 10 staging. A job error returns NULL so cron shows success, the step 10 last-success metric must read job_runs where error IS NULL.
 - Not done: 10. Next: step 10.
 - Commit hash: add in the step 10 entry.
+
+## 2026-10-24: step 10a done
+- Step 9c commit hash: e8bfb64.
+- Observability (spec section 11): allowlisted JSON logs (message text, args and tracebacks dropped), fresh request id per request (inbound X-Request-ID ignored), Sentry with scrubber (only if SENTRY_DSN set), Prometheus metrics at /metrics (bearer METRICS_TOKEN, 404 if unset), app.get_ops_metrics() for job last success (error IS NULL only) and storage_deletions backlog, new app.connect_listing_counted wrapper so connect_total counts only new rows. httpx and httpcore loggers set to WARNING so URLs never get logged. uvicorn access log disabled, Dockerfile CMD now uvicorn with --no-access-log (fastapi run has no such flag).
+- Full suite run by user: 231 passed, 2 skipped (opt-in EXPLAIN test, opt-in pooler test).
+- Open: test_api_works_through_transaction_pooler skipped (needs TEST_POOLER_DATABASE_URL), Docker image build not verified (pip network stall), cron schedule unverified locally, Sentry untested against a real DSN.
+- Not done: 10b (seed, EXPLAIN GiST proof, p95 at 50k tenants and 20k listings, DBSCAN cap risk). Next: 10b.
+- Commit hash: add in the 10b entry.

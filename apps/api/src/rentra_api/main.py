@@ -3,6 +3,7 @@ from collections import defaultdict, deque
 from ipaddress import ip_address, ip_network
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 import json
+import hmac
 import logging
 import math
 import threading
@@ -21,12 +22,15 @@ import httpx
 import psycopg
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from jwt import PyJWKClient
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from PIL import Image, ImageColor, ImageOps, UnidentifiedImageError
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
+from starlette.routing import Match
 
 from rentra_api.config import get_settings
+from rentra_api.logging_setup import setup_logging
 
 
 @asynccontextmanager
@@ -37,7 +41,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 
 app = FastAPI(title="Rentra API", version="0.1.0", lifespan=lifespan)
+setup_logging()
 logger = logging.getLogger("rentra_api")
+HTTP_REQUESTS = Counter("http_requests_total", "HTTP requests", ("route", "method", "status"))
+HTTP_DURATION = Histogram("http_request_duration_seconds", "HTTP request duration", ("route", "method"))
+RATE_LIMITED = Counter("rate_limited_total", "Rate limited requests")
+CONNECT_TOTAL = Counter("connect_total", "New listing connections")
+JOB_LAST_SUCCESS = Gauge("job_last_success_timestamp", "Unix timestamp of last successful job", ("job",))
+STORAGE_BACKLOG = Gauge("storage_deletions_backlog", "Pending storage deletion rows")
+STORAGE_OLDEST = Gauge("storage_deletions_oldest_pending_seconds", "Age of oldest pending storage deletion")
 
 MATCHES_SQL = """WITH loc AS (
       SELECT search_point, search_radius_km FROM app.tenant_locations WHERE user_id=%s
@@ -167,6 +179,8 @@ def _request_ip(request: Request) -> str:
 @app.middleware("http")
 async def limit_public_reads(request: Request, call_next):
     path = request.url.path
+    if path == "/metrics":
+        return await call_next(request)
     if request.method == "POST" and re.fullmatch(r"/listings/[^/]+/photos", path):
         content_length = request.headers.get("content-length")
         if content_length is None:
@@ -236,6 +250,44 @@ async def limit_public_reads(request: Request, call_next):
     return await call_next(request)
 
 
+@app.middleware("http")
+async def observe_request(request: Request, call_next):
+    request_id = str(uuid.uuid4())
+    request.state.request_id = request_id
+    started = time.perf_counter()
+    response = None
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    finally:
+        matched_route = request.scope.get("route")
+        if matched_route is None:
+            for candidate in app.router.routes:
+                match, _child_scope = candidate.matches(request.scope)
+                if match == Match.FULL:
+                    matched_route = candidate
+                    break
+        route = getattr(matched_route, "path", "unmatched")
+        elapsed = time.perf_counter() - started
+        if response is not None:
+            response.headers["X-Request-ID"] = request_id
+        HTTP_REQUESTS.labels(route, request.method, str(status_code)).inc()
+        if status_code == 429:
+            RATE_LIMITED.inc()
+        HTTP_DURATION.labels(route, request.method).observe(elapsed)
+        logger.info(
+            "http_request",
+            extra={
+                "event": "http_request", "request_id": request_id,
+                "route_template": route, "method": request.method,
+                "status": status_code, "latency_ms": round(elapsed * 1000, 3),
+                "user_id": getattr(request.state, "user_id", None),
+            },
+        )
+
+
 class AccountDeletionRequested(Exception):
     pass
 
@@ -288,6 +340,27 @@ def health_ready() -> dict[str, str]:
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Database connection failed") from exc
     return {"status": "ok"}
+
+
+@app.get("/metrics", include_in_schema=False)
+def metrics(authorization: Annotated[str | None, Header()] = None) -> Response:
+    token = get_settings().METRICS_TOKEN
+    if not token:
+        raise HTTPException(status_code=404, detail="Not found")
+    supplied = authorization[7:] if authorization and authorization.startswith("Bearer ") else ""
+    if not hmac.compare_digest(supplied, token):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    JOB_LAST_SUCCESS.clear()
+    with get_db_connection() as conn:
+        rows = conn.execute("SELECT kind, job, value FROM app.get_ops_metrics()").fetchall()
+    for kind, job, value in rows:
+        if kind == "job_last_success_timestamp" and value is not None:
+            JOB_LAST_SUCCESS.labels(job).set(value)
+        elif kind == "storage_deletions_backlog":
+            STORAGE_BACKLOG.set(value)
+        elif kind == "storage_deletions_oldest_pending_seconds":
+            STORAGE_OLDEST.set(value)
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 def _verify_access_token(token: str) -> dict[str, Any]:
@@ -372,6 +445,7 @@ class AccountDeletionRequest(BaseModel):
 
 def get_current_profile(
     authorization: Annotated[str | None, Header()] = None,
+    request: Request = None,
 ) -> dict[str, Any]:
     """Verify bearer auth and load the caller's row within an owner-scoped transaction."""
     if not authorization or not authorization.startswith("Bearer "):
@@ -382,6 +456,8 @@ def get_current_profile(
         )
     claims = _verify_access_token(authorization[7:].strip())
     uid = claims["sub"]
+    if request is not None:
+        request.state.user_id = str(uid)
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
@@ -802,7 +878,7 @@ def delete_me(
     if result in {"ok", "already_gone"}:
         return {"deleted": True}
     code = result if result in {"timeout", "network"} or re.fullmatch(r"http_[0-9]{3}", result or "") else "network"
-    logger.warning("account_deletion_auth_pending %s", code)
+    logger.warning("account_deletion_auth_pending", extra={"event": "account_deletion_auth_pending"})
     return JSONResponse(status_code=202, content={"status": "deletion_pending"})
 
 
@@ -1822,9 +1898,11 @@ def connect_to_listing(
     try:
         with get_db_connection() as conn:
             conn.execute("SELECT set_config('app.user_id', %s, true)", (str(profile["id"]),))
-            wa_link = conn.execute(
-                "SELECT app.connect_listing(%s)", (listing_id,)
-            ).fetchone()[0]
+            wa_link, inserted = conn.execute(
+                "SELECT wa_link, inserted FROM app.connect_listing_counted(%s)", (listing_id,)
+            ).fetchone()
+            if inserted:
+                CONNECT_TOTAL.inc()
     except psycopg.Error as exc:
         raise _connect_error(exc) from exc
     return {"wa_link": wa_link}
@@ -2315,7 +2393,11 @@ def read_matches(
             rows = conn.execute(sql, (uid, uid, uid, uid, cursor_day, cursor_day,
                                       cursor_hash, cursor_id, page_size + 1)).fetchall()
     except psycopg.Error as exc:
-        logger.exception("GET /matches database query failed")
+        exception_name = re.sub(r"[^a-z0-9_]", "_", type(exc).__name__.lower())
+        logger.error(
+            "matches_query_failed",
+            extra={"event": f"matches_query_failed_{exception_name}"},
+        )
         raise HTTPException(status_code=503, detail={"code":"MATCH_STORAGE_UNAVAILABLE","message":"Matches unavailable"}) from exc
 
     has_more = len(rows) > page_size and bool(rows and rows[0][9])

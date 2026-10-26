@@ -105,3 +105,11 @@ Append new entries at the bottom only; never edit or delete older entries. The b
 - Plans B (numeric rewrite) and C (answers rewrite) gave no speedup, kept because results are verified equal. The real cost inside `match_checks` was never isolated.
 - Open items: GiST proof, load test with many users, real-Supabase p95, worst-case 1.7 s re-measure, DBSCAN input cap unmeasured, pooler test skipped (needs `TEST_POOLER_DATABASE_URL`), Docker image build not verified, Sentry untested with a real DSN, cron schedule unverified locally.
 - Not pushed. Commit hash: add in the next entry.
+
+## 2026-10-24: backend V1 sealed locally, ready for real Supabase
+- Commit hash for the lean `match_checks` work: `bc38304` (branch `rentra-v1-backend`). Earlier hash: `c7d6aef` (30 km default, distance tiebreak, worst-case seed mode).
+- Backend V1 is committed locally and NOT pushed. Full suite on a clean reset: 237 passed, 7 skipped. All 46 migrations apply from zero with no errors.
+- Details live in `docs/rentra-v1-backend-test-report.md` (new file).
+- Next: real Supabase checklist (link CLI, `db push`, `rentra_api` password, pooler port 6543, `listing-photos` bucket, Google OAuth, API environment variables), then frontend.
+- Open items: GiST proof, load test with many users, real-Supabase p95, worst-case 1.7 s re-measure, DBSCAN input cap unmeasured, pooler test skipped (needs `TEST_POOLER_DATABASE_URL`), Docker image build not verified, Sentry untested with a real DSN, cron schedule unverified locally, restrict or regenerate the leaked `google_maps_key` before launch.
+- Unexplained: why `test_connect_creates_both_notifications_atomically` was green on the earlier clean run before the sequence grant fix.

@@ -1,3 +1,23 @@
-export default function AppHomePage() {
-  return <main className="simple-page"><p className="eyebrow">Your home</p><h1>For you</h1><p>Set preferences to get rental recommendations tailored to you.</p></main>;
+import { AppShell } from "@/components/app-shell";
+import { TenantHome } from "@/components/tenant-home";
+import { requireProfile } from "@/lib/server-auth";
+import { redirect } from "next/navigation";
+
+export const dynamic = "force-dynamic";
+
+export default async function AppHomePage() {
+  const { profile } = await requireProfile();
+  if (!profile.active_role) redirect("/onboarding/role");
+
+  return (
+    <AppShell activeRole={profile.active_role}>
+      {profile.active_role === "tenant" ? (
+        <TenantHome displayName={profile.display_name} />
+      ) : (
+        <section className="home-placeholder" aria-label="Landlord home">
+          <h1>Your listings</h1>
+        </section>
+      )}
+    </AppShell>
+  );
 }

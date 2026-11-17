@@ -22,6 +22,7 @@ import httpx
 import psycopg
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile, status
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from jwt import PyJWKClient
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -41,6 +42,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 
 app = FastAPI(title="Rentra API", version="0.1.0", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[get_settings().FRONTEND_ORIGIN],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+)
 setup_logging()
 logger = logging.getLogger("rentra_api")
 HTTP_REQUESTS = Counter("http_requests_total", "HTTP requests", ("route", "method", "status"))
@@ -180,7 +187,7 @@ async def limit_public_reads(request: Request, call_next):
             )
     is_write = request.method in {"POST", "PATCH", "DELETE", "PUT"} and (
         path == "/me/requirements" or
-        (path == "/me" and request.method == "DELETE") or
+        (path == "/me" and request.method in {"PUT", "DELETE"}) or
         path == "/listings" or (path.startswith("/listings/") and not path.endswith("/connect"))
     )
     is_read = request.method == "GET" and (
@@ -383,6 +390,7 @@ class ProfileUpdate(BaseModel):
 
     display_name: str | None = Field(default=None, max_length=120)
     whatsapp: str | None = Field(default=None, max_length=16)
+    active_role: Literal["tenant", "landlord"] | None = None
     confirm: bool = False
 
     @field_validator("whatsapp")
@@ -445,7 +453,7 @@ def get_current_profile(
                     (uid,),
                 )
                 cur.execute(
-                    """SELECT id, display_name, whatsapp, deletion_requested_at, created_at
+                    """SELECT id, display_name, whatsapp, active_role, deletion_requested_at, created_at
                        FROM app.profiles WHERE id = %s""",
                     (uid,),
                 )
@@ -461,7 +469,7 @@ def get_current_profile(
 
     if row is None:
         raise HTTPException(status_code=401, detail="Profile unavailable")
-    profile = dict(zip(("id", "display_name", "whatsapp", "deletion_requested_at", "created_at"), row))
+    profile = dict(zip(("id", "display_name", "whatsapp", "active_role", "deletion_requested_at", "created_at"), row))
     if profile["deletion_requested_at"] is not None:
         raise AccountDeletionRequested()
     return profile
@@ -472,6 +480,7 @@ def profile_json(profile: dict[str, Any]) -> dict[str, Any]:
         "id": str(profile["id"]),
         "display_name": profile["display_name"],
         "whatsapp": profile["whatsapp"],
+        "active_role": profile["active_role"],
         "created_at": profile["created_at"].isoformat(),
     }
 
@@ -765,7 +774,7 @@ def update_me(
     profile: Annotated[dict[str, Any], Depends(get_current_profile)],
 ) -> dict[str, Any]:
     """Update only explicitly supplied allowlisted profile fields."""
-    fields = update.model_fields_set & {"display_name", "whatsapp"}
+    fields = update.model_fields_set & {"display_name", "whatsapp", "active_role"}
     uid = str(profile["id"])
     clearing_whatsapp = "whatsapp" in update.model_fields_set and update.whatsapp is None
     if fields:
@@ -774,21 +783,23 @@ def update_me(
                 with conn.cursor() as cur:
                     cur.execute("SELECT set_config('app.user_id', %s, true)", (uid,))
                     if clearing_whatsapp:
-                        if "display_name" in fields:
+                        other_fields = fields - {"whatsapp"}
+                        if other_fields:
+                            assignments = ", ".join(f"{field} = %s" for field in sorted(other_fields))
+                            values = [getattr(update, field) for field in sorted(other_fields)]
                             cur.execute(
-                                "UPDATE app.profiles SET display_name = %s WHERE id = %s",
-                                (update.display_name, uid),
+                                f"UPDATE app.profiles SET {assignments} WHERE id = %s",
+                                (*values, uid),
                             )
                         cur.execute("SELECT app.clear_my_whatsapp(%s)", (update.confirm,))
                         updated_profile = {**profile, "whatsapp": None}
-                        if "display_name" in fields:
-                            updated_profile["display_name"] = update.display_name
+                        updated_profile.update({field: getattr(update, field) for field in other_fields})
                         return profile_json(updated_profile)
 
                     assignments = ", ".join(f"{field} = %s" for field in sorted(fields))
                     values = [getattr(update, field) for field in sorted(fields)]
                     cur.execute(
-                        f"UPDATE app.profiles SET {assignments} WHERE id = %s RETURNING id, display_name, whatsapp, deletion_requested_at, created_at",
+                        f"UPDATE app.profiles SET {assignments} WHERE id = %s RETURNING id, display_name, whatsapp, active_role, deletion_requested_at, created_at",
                         (*values, uid),
                     )
                     row = cur.fetchone()
@@ -819,7 +830,7 @@ def update_me(
 
         if row is None:
             raise HTTPException(status_code=404, detail="Profile not found")
-        return profile_json(dict(zip(("id", "display_name", "whatsapp", "deletion_requested_at", "created_at"), row)))
+        return profile_json(dict(zip(("id", "display_name", "whatsapp", "active_role", "deletion_requested_at", "created_at"), row)))
     return profile_json(profile)
 
 

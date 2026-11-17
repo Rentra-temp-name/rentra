@@ -113,3 +113,4 @@ Append new entries at the bottom only; never edit or delete older entries. The b
 - Next: real Supabase checklist (link CLI, `db push`, `rentra_api` password, pooler port 6543, `listing-photos` bucket, Google OAuth, API environment variables), then frontend.
 - Open items: GiST proof, load test with many users, real-Supabase p95, worst-case 1.7 s re-measure, DBSCAN input cap unmeasured, pooler test skipped (needs `TEST_POOLER_DATABASE_URL`), Docker image build not verified, Sentry untested with a real DSN, cron schedule unverified locally, restrict or regenerate the leaked `google_maps_key` before launch.
 - Unexplained: why `test_connect_creates_both_notifications_atomically` was green on the earlier clean run before the sequence grant fix.
+- `profiles.active_role` is a nullable UI-mode field exposed through `GET/PUT /me`; it does not affect authorization or matching.

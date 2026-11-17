@@ -81,6 +81,7 @@ def test_first_request_creates_profile_once(signed_in_user, test_database_url):
         second = client.get("/me", headers=signed_in_user["headers"])
     assert first.status_code == second.status_code == 200
     assert first.json()["id"] == signed_in_user["id"]
+    assert first.json()["active_role"] is None
     with psycopg.connect(test_database_url) as conn, conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM app.profiles WHERE id = %s", (signed_in_user["id"],))
         assert cur.fetchone()[0] == 1
@@ -98,6 +99,39 @@ def test_update_normalizes_phone_and_rejects_invalid_or_unknown_fields(signed_in
     assert updated.json()["whatsapp"] == "+9779876543210"
     assert invalid_phone.status_code == 422
     assert unknown.status_code == 422
+
+
+def test_active_role_can_be_set_to_tenant_landlord_and_null(signed_in_user):
+    with TestClient(app) as client:
+        initial = client.get("/me", headers=signed_in_user["headers"])
+        tenant = client.put("/me", headers=signed_in_user["headers"], json={"active_role": "tenant"})
+        landlord = client.put("/me", headers=signed_in_user["headers"], json={"active_role": "landlord"})
+        cleared = client.put("/me", headers=signed_in_user["headers"], json={"active_role": None})
+    assert initial.status_code == 200 and initial.json()["active_role"] is None
+    assert tenant.status_code == 200 and tenant.json()["active_role"] == "tenant"
+    assert landlord.status_code == 200 and landlord.json()["active_role"] == "landlord"
+    assert cleared.status_code == 200 and cleared.json()["active_role"] is None
+
+
+def test_active_role_rejects_invalid_values_and_partial_update_preserves_profile(signed_in_user):
+    with TestClient(app) as client:
+        seeded = client.put(
+            "/me", headers=signed_in_user["headers"],
+            json={"display_name": "Profile name", "whatsapp": "9812345678"},
+        )
+        invalid = client.put(
+            "/me", headers=signed_in_user["headers"], json={"active_role": "agent"},
+        )
+        role_only = client.put(
+            "/me", headers=signed_in_user["headers"], json={"active_role": "tenant"},
+        )
+    assert seeded.status_code == 200
+    assert invalid.status_code == 422
+    assert invalid.json()["detail"]
+    assert role_only.status_code == 200
+    assert role_only.json()["active_role"] == "tenant"
+    assert role_only.json()["display_name"] == "Profile name"
+    assert role_only.json()["whatsapp"] == "+9779812345678"
 
 
 def test_public_profile_only_shows_contact_fields_and_hides_deleted_or_unknown(signed_in_user, test_database_url):

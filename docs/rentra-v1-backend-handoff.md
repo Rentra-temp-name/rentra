@@ -23,7 +23,7 @@ Tags: **[PRODUCT]** decided by the owner. **[ENG]** engineering default, changea
 
 ## 2. Access
 
-- Principals: visitor, user, admin. No stored role. Tenant and landlord are switchable modes. Switching never deletes anything, and each side's data stays saved. Authorization is by ownership. [PRODUCT]
+- Principals: visitor, user, admin. Tenant and landlord are switchable UI modes stored in `profiles.active_role`; null means role onboarding is needed. This field never affects authorization. Switching never deletes anything, and each side's data stays saved. Authorization is by ownership. [PRODUCT]
 - The tenant's own household type is not stored. The tenant only sets must or nice on the landlord's tenant-type options (bachelors, family, all allowed). [PRODUCT]
 - Admin = a row in `app.admins`, inserted by SQL only. Admin routes check `admins` in the DB on every request.
 - Admin powers: suspend and unsuspend any listing, resolve reports. No user suspension in V1. Every admin action writes `admin_actions(admin_id, action, listing_id, reason, at)`. [PRODUCT]

@@ -1053,12 +1053,13 @@ def update_my_locations(
 
 
 def _listing_result(row: tuple[Any, ...]) -> dict[str, Any]:
-    listing_id, title, rent_amount, latitude, longitude, whatsapp, created_at = row
+    listing_id, title, rent_amount, latitude, longitude, display_name, whatsapp, created_at = row
     return {
         "id": str(listing_id),
         "title": title,
         "rent_amount": str(rent_amount),
         "point": {"latitude": float(latitude), "longitude": float(longitude)},
+        "display_name": display_name,
         "whatsapp": whatsapp,
         "created_at": created_at.isoformat(),
     }
@@ -1102,7 +1103,7 @@ def _decode_feed_cursor(cursor: str | None) -> tuple[datetime | None, UUID | Non
 PUBLIC_LISTING_SELECT = """SELECT listing.id, listing.title, listing.rent_amount,
        extensions.st_y(listing.point::extensions.geometry),
        extensions.st_x(listing.point::extensions.geometry),
-       public_profile.whatsapp, listing.created_at
+       public_profile.display_name, public_profile.whatsapp, listing.created_at
 FROM app.listings AS listing
 CROSS JOIN LATERAL app.get_public_profile(listing.owner_id) AS public_profile
 WHERE listing.status = 'active' AND listing.suspended_at IS NULL"""
@@ -2434,12 +2435,30 @@ def read_public_listing(listing_ref: str) -> dict[str, Any]:
                 (str(listing_id),),
             ).fetchone()
             photos = _listing_photos_json(conn, str(listing_id)) if row is not None else []
+            numeric = conn.execute(
+                "SELECT field, value FROM app.listing_numeric WHERE listing_id = %s ORDER BY field",
+                (str(listing_id),),
+            ).fetchall() if row is not None else []
+            answers = conn.execute(
+                """SELECT attribute.key, option.label
+                   FROM app.listing_answers AS answer
+                   JOIN app.attributes AS attribute ON attribute.id = answer.attribute_id
+                   JOIN app.attribute_options AS option ON option.id = answer.option_id
+                   WHERE answer.listing_id = %s
+                   ORDER BY attribute.key, option.sort_order""",
+                (str(listing_id),),
+            ).fetchall() if row is not None else []
     except psycopg.Error as exc:
         raise HTTPException(status_code=503, detail={"code": "listing_storage_unavailable", "message": "Listing unavailable"}) from exc
     if row is None:
         raise HTTPException(status_code=404, detail={"code": "listing_not_found", "message": "Listing not found"})
     listing = _listing_result(row)
     listing["photos"] = photos
+    listing["numeric"] = {field: str(value) for field, value in numeric}
+    answer_map: dict[str, list[str]] = {}
+    for attribute_key, option_label in answers:
+        answer_map.setdefault(attribute_key, []).append(option_label)
+    listing["answers"] = answer_map
     return listing
 
 

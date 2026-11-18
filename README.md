@@ -38,3 +38,5 @@ The API health endpoint is available at `/health`. Service integrations remain u
 ## Project decisions and open questions
 
 See [`docs`](docs/) for the current MVP scope, user flows, and technical decisions. Values marked TBD remain undecided.
+
+For the real Supabase and tenant/landlord matching handoff checklist, see [`docs/things-to-do-after-setting-everything-up.md`](docs/things-to-do-after-setting-everything-up.md).

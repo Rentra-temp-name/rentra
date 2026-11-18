@@ -17,13 +17,13 @@
   text-decoration: none;
 }
 
-/* ── Sidebar spacing: 24px from edge ─────────────────────────────── */
+/* Compact rail with an expanded, labelled state. */
 .app-sidebar {
   box-sizing: border-box;
-  width: 65px;
+  width: 72px;
   align-items: stretch;
   overflow: hidden;
-  padding: 22px 8px 24px;
+  padding: 22px 0 24px;
   background: var(--color-background);
   transition: width 300ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
@@ -32,8 +32,15 @@
   width: 200px;
 }
 
+/* A 23px icon centered in the 71px inner rail leaves exactly 24px on either side. */
+.app-sidebar:not([data-expanded="true"]) {
+  width: 72px;
+  padding-right: 0;
+  padding-left: 0;
+}
+
 .app-main {
-  margin-left: 65px;
+  margin-left: 72px;
   transition: margin-left 300ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
@@ -41,32 +48,41 @@
   margin-left: 200px;
 }
 
-/* ── Nav gap: 24px between icons ─────────────────────────────────── */
+.app-sidebar:not([data-expanded="true"]) + .app-main {
+  margin-left: 72px;
+}
+
+/* ── Navigation spacing ──────────────────────────────────────────── */
 .sidebar-nav {
   display: flex;
   width: 100%;
+  align-items: center;
   flex-direction: column;
   gap: 8px;
   margin-top: 48px;
 }
 
-/* ── Content area: 24px gap from sidebar ─────────────────────────── */
+/* Keep the page content exactly 24px from the sidebar edge. */
 .app-content {
   padding: 40px 40px 52px 24px;
 }
 
 /* Keep the home sections flush with the app content's 24px sidebar gap. */
 .tenant-home {
+  width: calc(100% - 80px);
   max-width: none;
   margin: 0;
 }
 
 /* Buttons inherit the site-wide button padding; reset it so sidebar icons
    stay centered inside their 48px navigation targets. */
-.sidebar-link {
+.app-sidebar .sidebar-link {
   width: 100%;
   flex: 0 0 48px;
   display: flex;
+  align-self: stretch;
+  box-sizing: border-box;
+  align-items: center;
   justify-content: center;
   gap: 12px;
   box-sizing: border-box;
@@ -76,9 +92,41 @@
   white-space: nowrap;
 }
 
+.app-sidebar:not([data-expanded="true"]) .sidebar-link {
+  width: 100%;
+  align-self: stretch;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.app-sidebar:not([data-expanded="true"]) .sidebar-link > .sidebar-icon {
+  flex: 0 0 23px;
+  width: 23px;
+  margin-inline: 24px;
+  transform: translateX(7px);
+}
+
 .app-sidebar[data-expanded="true"] .sidebar-link {
+  width: 100%;
+  align-self: stretch;
   justify-content: flex-start;
-  padding: 0 12px;
+  padding: 0 24px;
+}
+
+/* Center the brand mark and every collapsed navigation target in the rail. */
+.app-sidebar:not([data-expanded="true"]) .sidebar-logo--text {
+  justify-content: center;
+  padding: 0;
+}
+
+.sidebar-user-wrap {
+  display: flex;
+  justify-content: center;
+}
+
+.app-sidebar[data-expanded="true"] .sidebar-user-wrap {
+  display: block;
 }
 
 .sidebar-icon {
@@ -190,11 +238,6 @@
   stroke-width: 1.8;
 }
 
-/* ── Section gap: 150px ──────────────────────────────────────────── */
-.tenant-sections {
-  gap: 150px;
-}
-
 @media (max-width: 700px) {
   .app-sidebar,
   .app-sidebar[data-expanded="true"] {
@@ -234,5 +277,13 @@
   .app-sidebar[data-expanded="true"] + .app-main {
     margin-left: 0;
     transition: none;
+  }
+
+  .app-content {
+    padding-left: 24px;
+  }
+
+  .tenant-home {
+    width: calc(100% - 98px);
   }
 }

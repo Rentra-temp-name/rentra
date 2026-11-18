@@ -4,14 +4,12 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useState } from "react";
 import { Bell, Bookmark, House, LogOut, MapPinSearch, UserRound, type LucideIcon } from "lucide-react";
-import type { ActiveRole } from "@/lib/api";
-import { updateActiveRole } from "@/lib/api";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import "./app-shell-overrides.css";
 
 type AppShellProps = {
-  activeRole: ActiveRole;
   children: React.ReactNode;
+  signedIn: boolean;
 };
 
 type NavItem = {
@@ -19,43 +17,25 @@ type NavItem = {
   href: string;
   Icon: LucideIcon;
   matchPrefix?: boolean;
+  matchPaths?: string[];
 };
 
-const navItems: NavItem[] = [
-  { label: "Home", href: "/app", Icon: House, matchPrefix: true },
-  { label: "Map search", href: "/map", Icon: MapPinSearch, matchPrefix: true },
-  { label: "Saved listings", href: "/saved", Icon: Bookmark, matchPrefix: true },
-];
-
-export function AppShell({ activeRole, children }: AppShellProps) {
+export function AppShell({ children, signedIn }: AppShellProps) {
   const router = useRouter();
   const pathname = usePathname();
   const [expanded, setExpanded] = useState(false);
-  const [savingRole, setSavingRole] = useState(false);
   const [error, setError] = useState("");
+  const navItems: NavItem[] = [
+    { label: "Home", href: signedIn ? "/app" : "/rent", Icon: House, matchPrefix: true },
+    { label: "Map search", href: "/map", Icon: MapPinSearch, matchPrefix: true, matchPaths: signedIn ? ["/rent"] : [] },
+    { label: "Saved listings", href: "/saved", Icon: Bookmark, matchPrefix: true },
+  ];
 
   function isActive(item: NavItem) {
     if (!pathname) return false;
     if (pathname === item.href) return true;
-    return Boolean(item.matchPrefix && pathname.startsWith(`${item.href}/`));
-  }
-
-  async function switchRole(nextRole: ActiveRole) {
-    if (nextRole === activeRole || savingRole) return;
-    setSavingRole(true);
-    setError("");
-
-    try {
-      const supabase = createSupabaseBrowserClient();
-      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
-      if (sessionError || !session?.access_token) throw new Error("Your session expired. Sign in again.");
-      await updateActiveRole(session.access_token, nextRole);
-      router.refresh();
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not switch mode. Try again.");
-    } finally {
-      setSavingRole(false);
-    }
+    if (item.matchPrefix && pathname.startsWith(`${item.href}/`)) return true;
+    return Boolean(item.matchPaths?.some((path) => pathname === path || pathname.startsWith(`${path}/`)));
   }
 
   async function signOut() {
@@ -123,22 +103,31 @@ export function AppShell({ activeRole, children }: AppShellProps) {
           </button>
         </nav>
         <div className="sidebar-user-wrap">
-          <Link
-            className={`sidebar-link sidebar-user${pathname === "/account" || pathname.startsWith("/account/") ? " is-active" : ""}`}
-            href="/account"
-            aria-label="Account"
-            aria-current={pathname === "/account" || pathname.startsWith("/account/") ? "page" : undefined}
-            title={!expanded ? "Account" : undefined}
-          >
-            <UserRound className="sidebar-icon sidebar-icon--account" aria-hidden="true" strokeWidth={1.7} />
-            <span className="sidebar-link-label" aria-hidden={!expanded}>Account</span>
-          </Link>
-          <div className="sidebar-logout-popup" role="menu">
-            <button className="sidebar-logout-btn" type="button" onClick={signOut} role="menuitem">
-              <LogOut aria-hidden="true" />
-              Log out
-            </button>
-          </div>
+          {signedIn ? (
+            <>
+              <Link
+                className={`sidebar-link sidebar-user${pathname === "/account" || pathname.startsWith("/account/") ? " is-active" : ""}`}
+                href="/account"
+                aria-label="Account"
+                aria-current={pathname === "/account" || pathname.startsWith("/account/") ? "page" : undefined}
+                title={!expanded ? "Account" : undefined}
+              >
+                <UserRound className="sidebar-icon sidebar-icon--account" aria-hidden="true" strokeWidth={1.7} />
+                <span className="sidebar-link-label" aria-hidden={!expanded}>Account</span>
+              </Link>
+              <div className="sidebar-logout-popup" role="menu">
+                <button className="sidebar-logout-btn" type="button" onClick={signOut} role="menuitem">
+                  <LogOut aria-hidden="true" />
+                  Log out
+                </button>
+              </div>
+            </>
+          ) : (
+            <Link className="sidebar-link sidebar-user" href="/login" aria-label="Sign in" title={!expanded ? "Sign in" : undefined}>
+              <UserRound className="sidebar-icon" aria-hidden="true" strokeWidth={1.7} />
+              <span className="sidebar-link-label" aria-hidden={!expanded}>Sign in</span>
+            </Link>
+          )}
         </div>
       </aside>
 

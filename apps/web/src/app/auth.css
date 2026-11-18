@@ -518,52 +518,43 @@
 /* Tenant dashboard: proportions and section order follow the supplied Figma reference. */
 .tenant-home {
   width: 100%;
-  max-width: 1237px;
-  margin: 0 auto;
-  padding: 0 0 52px;
-  animation: tenant-home-in .44s ease both;
-}
-
-@keyframes tenant-home-in {
-  from {
-    opacity: 0;
-    transform: translateY(7px);
-  }
-
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+  max-width: none;
+  margin: 0;
+  padding: 0 0 56px;
 }
 
 .tenant-welcome {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
 }
 
 .tenant-welcome h1 {
   max-width: none;
   margin: 0;
   color: var(--color-text);
+  font-family: var(--font-ui);
   font-size: 32px;
   font-weight: 500;
-  line-height: 1.25;
-  letter-spacing: -.035em;
+  line-height: 1;
+  letter-spacing: 0;
 }
 
 .tenant-welcome p {
   margin: 0;
   color: var(--color-muted);
+  font-family: var(--font-ui);
   font-size: 16px;
-  line-height: 1.5;
+  font-weight: 400;
+  line-height: 1;
+  letter-spacing: 0;
 }
 
 .tenant-sections {
   display: flex;
   flex-direction: column;
   gap: 150px;
-  margin-top: 112px;
+  margin-top: 100px;
 }
 
 .tenant-listing-section,
@@ -572,7 +563,7 @@
   width: 100%;
   flex-direction: column;
   align-items: flex-start;
-  gap: 26px;
+  gap: 30px;
 }
 
 .tenant-section-heading {
@@ -587,93 +578,76 @@
 .tenant-featured-section>h2 {
   margin: 0;
   color: var(--color-text);
-  font-size: 26px;
+  font-family: var(--font-ui);
+  font-size: 28px;
   font-weight: 500;
-  line-height: 1.35;
-  letter-spacing: -.025em;
+  line-height: 1;
+  letter-spacing: 0;
 }
 
 .tenant-section-link {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  color: var(--color-muted);
+  gap: 10px;
+  color: var(--color-text);
+  font-family: var(--font-ui);
   font-size: 14px;
-  font-weight: 500;
-  transition: color 160ms ease;
+  font-weight: 600;
+  transition: opacity 160ms ease;
 }
 
 .tenant-section-link svg {
-  width: 16px;
-  height: 16px;
-  transition: transform 160ms ease;
+  width: 15px;
+  height: 15px;
 }
 
 .tenant-section-link:hover {
-  color: var(--color-primary);
-}
-
-.tenant-section-link:hover svg {
-  transform: translateX(3px);
+  opacity: .7;
 }
 
 .tenant-listing-grid {
-  display: grid;
+  display: flex;
   width: 100%;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: clamp(20px, 3vw, 50px);
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 50px;
 }
 
 .tenant-listing-card {
   position: relative;
   min-width: 0;
   overflow: hidden;
+  width: min(372px, 100%);
+  border: 0;
   border-radius: 30px;
-  background: var(--color-surface);
-  box-shadow: 0 2px 8px rgba(43, 43, 43, .075);
-  transition: box-shadow 220ms ease;
-  animation: tenant-card-in .38s ease both;
+  background: #fafafa;
+  box-shadow: 0 2px 7.5px rgba(104, 104, 104, .08);
 }
 
-.tenant-listing-card:nth-child(2) {
-  animation-delay: 55ms;
-}
-
-.tenant-listing-card:nth-child(3) {
-  animation-delay: 110ms;
-}
-
-.tenant-listing-card:hover {
-  box-shadow: 0 4px 12px rgba(43, 43, 43, .12);
-}
-
-@keyframes tenant-card-in {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+.tenant-listing-link {
+  display: block;
+  color: inherit;
+  text-decoration: none;
 }
 
 .tenant-listing-photo {
   position: relative;
   display: grid;
   width: 100%;
-  height: clamp(190px, 19vw, 240px);
+  height: auto;
+  aspect-ratio: 4 / 3;
   overflow: hidden;
   place-items: center;
   background: #eceeeb;
+  border-radius: 30px 30px 0 0;
 }
 
 .tenant-listing-photo img {
   width: 100%;
   height: 100%;
   object-fit: cover;
-  transition: transform 300ms ease;
+  object-position: center;
 }
 
 .tenant-photo-fallback {
@@ -691,24 +665,17 @@
 
 .tenant-bookmark {
   position: absolute;
-  top: 13px;
-  right: 13px;
-  z-index: 1;
-  width: 38px;
-  height: 38px;
+  top: 10px;
+  right: 11px;
+  z-index: 2;
+  width: 36px;
+  height: 36px;
   display: grid;
   place-items: center;
   padding: 0;
-  color: #333;
-  background: rgba(255, 255, 255, .94);
+  background: transparent;
   border: 0;
-  border-radius: 50%;
   cursor: pointer;
-  transition: color 160ms ease, transform 160ms ease;
-}
-
-.tenant-bookmark:hover:not(:disabled) {
-  color: var(--color-primary);
 }
 
 .tenant-bookmark:disabled {
@@ -717,40 +684,41 @@
 }
 
 .tenant-bookmark svg {
-  width: 18px;
-  height: 18px;
-  stroke-width: 1.8;
+  width: 19px;
+  height: 27px;
+}
+
+.tenant-bookmark img {
+  width: 19px;
+  height: 27px;
 }
 
 .tenant-card-body {
+  position: relative;
   display: flex;
-  min-height: 178px;
   flex-direction: column;
   justify-content: space-between;
-  gap: 18px;
-  padding: 19px 21px 18px;
+  gap: 20px;
+  padding: 20px 25px 20px 20px;
 }
 
 .tenant-card-details {
   display: flex;
   min-width: 0;
   flex-direction: column;
-  gap: 8px;
-  padding-right: 25px;
+  gap: 10px;
+  padding-right: 42px;
 }
 
 .tenant-card-title {
   overflow: hidden;
-  color: var(--color-text);
+  color: #000;
+  font-family: "IBM Plex Sans", sans-serif;
   font-size: 16px;
   font-weight: 500;
-  line-height: 1.4;
+  line-height: normal;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.tenant-card-title:hover {
-  color: var(--color-primary-dark);
 }
 
 .tenant-card-location {
@@ -760,59 +728,89 @@
   gap: 6px;
   margin: 0;
   overflow: hidden;
-  color: #818582;
-  font-size: 13px;
-  line-height: 1.4;
+  color: #908e8e;
+  font-family: "IBM Plex Sans", sans-serif;
+  font-size: 14px;
+  line-height: normal;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.tenant-card-location svg {
-  width: 14px;
-  height: 14px;
-  flex: 0 0 auto;
+.tenant-card-specifications {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #2b2b2b;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: normal;
+}
+
+.tenant-card-specification {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  white-space: nowrap;
+}
+
+.tenant-card-specification img {
+  width: 8px;
+  height: 8px;
 }
 
 .tenant-card-footer {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 20px;
 }
 
 .tenant-card-price {
   margin: 0;
-  color: var(--color-text);
+  color: #2b2b2b;
+  font-family: "IBM Plex Sans", sans-serif;
   font-size: 16px;
   font-weight: 500;
+  line-height: normal;
   font-variant-numeric: tabular-nums;
 }
 
 .tenant-card-status {
   display: flex;
-  min-height: 20px;
+  min-height: 24px;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  color: var(--color-muted);
-  font-size: 12px;
+  justify-content: center;
+  gap: 20px;
+  color: #1f7418;
+  font-family: "IBM Plex Sans", sans-serif;
+  font-size: 16px;
+  line-height: normal;
 }
 
-.tenant-card-status span {
+.tenant-card-status .tenant-card-active {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  color: #57645a;
+  gap: 6px;
+  color: #1f7418;
+  font-family: Inter, sans-serif;
+  font-size: 12px;
+  font-weight: 500;
 }
 
-.tenant-card-status i {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: #4a9254;
+.tenant-card-active img {
+  width: 24px;
+  height: 24px;
+}
+
+.tenant-card-time-separator {
+  width: 8px;
+  height: 8px;
 }
 
 .tenant-card-status time {
-  font-size: 12px;
+  color: #1f7418;
+  font-size: 16px;
+  white-space: nowrap;
 }
 
 .tenant-empty-state {
@@ -825,7 +823,7 @@
 }
 
 .tenant-featured-section {
-  align-items: center;
+  align-items: flex-start;
 }
 
 .tenant-featured-section>h2 {
@@ -836,16 +834,21 @@
 .tenant-featured-skeleton,
 .tenant-featured-property {
   width: min(903px, 100%);
-  min-height: 280px;
-  border-radius: 23px;
+  border-radius: 16px;
 }
 
 .tenant-featured-empty {
   display: grid;
+  min-height: 144px;
   place-items: center;
-  padding: 34px;
-  background: #eceeeb;
+  padding: 28px;
+  border: 1px dashed var(--color-border);
+  background: var(--color-surface);
   text-align: center;
+}
+
+.tenant-featured-skeleton {
+  aspect-ratio: 903 / 579;
 }
 
 .tenant-featured-empty p {
@@ -859,9 +862,13 @@
 .tenant-featured-property {
   position: relative;
   display: block;
-  height: clamp(420px, 45vw, 579px);
+  align-self: center;
+  aspect-ratio: 903 / 579;
   overflow: hidden;
+  border: 0;
+  border-radius: 30px;
   background: #343a36;
+  box-shadow: 0 2px 15px -2px rgba(104, 104, 104, .08);
 }
 
 .tenant-featured-image,
@@ -874,10 +881,11 @@
 
 .tenant-featured-image {
   object-fit: cover;
+  object-position: center;
 }
 
 .tenant-featured-shade {
-  background: linear-gradient(180deg, transparent 35%, rgba(0, 0, 0, .63) 100%);
+  background: rgba(34, 32, 32, .5);
 }
 
 .tenant-featured-no-photo {
@@ -898,55 +906,77 @@
 
 .tenant-featured-details {
   position: absolute;
-  right: 28px;
-  bottom: 44px;
-  left: 34px;
+  right: auto;
+  bottom: 65px;
+  left: 65px;
   display: flex;
+  width: 277px;
   flex-direction: column;
   align-items: flex-start;
   gap: 10px;
   color: #fff;
-  font-size: 20px;
+  font-size: 22px;
   font-weight: 500;
 }
 
 .tenant-featured-details strong {
   font-size: 22px;
   font-weight: 500;
+  line-height: normal;
 }
 
 .tenant-featured-location {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  color: rgba(255, 255, 255, .88);
-  font-size: 15px;
+  color: #e8e7e7;
+  font-family: Inter, sans-serif;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 19px;
 }
 
-.tenant-featured-location svg {
-  width: 15px;
-  height: 15px;
+.tenant-featured-specifications {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: #e8e7e7;
+  font-family: Inter, sans-serif;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 19px;
+}
+
+.tenant-featured-specifications img {
+  width: 8px;
+  height: 8px;
 }
 
 .tenant-featured-dots {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 12.5px;
+}
+
+.tenant-featured-reference-dots {
+  align-self: center;
+  width: 55px;
+  height: 15px;
 }
 
 .tenant-featured-dots button {
-  width: 12px;
-  height: 12px;
+  width: 10px;
+  height: 10px;
   padding: 0;
   border: 0;
   border-radius: 50%;
-  background: #d5d8d5;
+  background: #bababa;
   cursor: pointer;
 }
 
 .tenant-featured-dots button.is-active {
-  outline: 1px solid rgba(43, 43, 43, .38);
-  outline-offset: 2px;
+  width: 15px;
+  height: 15px;
+  background: #050505;
 }
 
 .tenant-featured-dots button:focus-visible {
@@ -958,14 +988,17 @@
   position: relative;
   isolation: isolate;
   display: inline-flex;
+  align-self: flex-start;
   align-items: center;
   justify-content: center;
-  padding: 15px 44px;
-  border-radius: 12px;
+  min-height: 40px;
+  width: auto;
+  padding: 10px 16px;
+  border-radius: 10px;
   background: transparent;
   color: #fff;
   font: inherit;
-  font-size: 17.5px;
+  font-size: 14px;
   font-weight: 500;
   line-height: 1;
   border: none;
@@ -980,7 +1013,7 @@
   position: absolute;
   inset: 0;
   z-index: 0;
-  border-radius: 12px;
+  border-radius: 10px;
   background-color: var(--color-primary);
   transform-origin: center;
   transition: transform 300ms ease-out, background-color 200ms ease;
@@ -1011,7 +1044,7 @@
   z-index: 1;
   display: inline-flex;
   align-items: center;
-  gap: 10px;
+  gap: 0;
   pointer-events: none;
 }
 
@@ -1026,53 +1059,100 @@
 }
 
 .tenant-listing-skeleton {
+  width: min(372px, 100%);
+  flex: 0 1 372px;
   min-width: 0;
   overflow: hidden;
   border-radius: 30px;
-  background: var(--color-surface);
+  background: #fafafa;
+  box-shadow: 0 2px 7.5px rgba(104, 104, 104, .08);
 }
 
 .tenant-skeleton-photo {
-  height: clamp(190px, 19vw, 240px);
-  background: linear-gradient(100deg, #e9ebe9 20%, #f2f3f2 38%, #e9ebe9 58%);
-  background-size: 220% 100%;
-  animation: tenant-shimmer 1.35s ease-in-out infinite;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 4 / 3;
+  background: #eceeeb;
+  border-radius: 30px 30px 0 0;
 }
 
-.tenant-skeleton-copy {
+.tenant-skeleton-body {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 22px 20px;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 20px 25px 20px 20px;
 }
 
-.tenant-skeleton-copy i {
+.tenant-skeleton-details,
+.tenant-skeleton-footer {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.tenant-skeleton-details {
+  width: 100%;
+  gap: 10px;
+}
+
+.tenant-skeleton-footer {
+  width: 100%;
+  gap: 20px;
+}
+
+.tenant-skeleton-body i {
   display: block;
   height: 12px;
-  border-radius: 7px;
+  border-radius: 0;
   background: #eceeec;
-  animation: tenant-shimmer 1.35s ease-in-out infinite;
 }
 
-.tenant-skeleton-copy i:first-child {
+.tenant-skeleton-details i:first-child {
   width: 76%;
   height: 15px;
 }
 
-.tenant-skeleton-copy i:last-child {
-  width: 48%;
+.tenant-skeleton-details i:nth-child(2) {
+  width: 68%;
+}
+
+.tenant-skeleton-details i:last-child {
+  width: 55%;
+}
+
+.tenant-skeleton-price {
+  width: 44%;
+  height: 15px !important;
+}
+
+.tenant-skeleton-status {
+  display: flex;
+  width: 100%;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+}
+
+.tenant-skeleton-status i:first-child {
+  width: 54px;
+  height: 14px;
+}
+
+.tenant-skeleton-status i:nth-child(2) {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.tenant-skeleton-status i:last-child {
+  width: 56px;
+  height: 14px;
 }
 
 .tenant-featured-skeleton {
-  background: linear-gradient(100deg, #e9ebe9 20%, #f2f3f2 38%, #e9ebe9 58%);
-  background-size: 220% 100%;
-  animation: tenant-shimmer 1.35s ease-in-out infinite;
-}
-
-@keyframes tenant-shimmer {
-  to {
-    background-position-x: -220%;
-  }
+  background: #eceeeb;
 }
 
 .tenant-load-error {
@@ -1194,28 +1274,28 @@
   }
 
   .tenant-welcome h1 {
-    font-size: 26px;
+    font-size: 32px;
   }
 
   .tenant-welcome p {
     max-width: 360px;
-    font-size: 15px;
-    line-height: 1.45;
+    font-size: 16px;
+    line-height: 1;
   }
 
   .tenant-sections {
-    gap: 76px;
-    margin-top: 66px;
+    gap: 150px;
+    margin-top: 100px;
   }
 
   .tenant-listing-section,
   .tenant-featured-section {
-    gap: 19px;
+    gap: 30px;
   }
 
   .tenant-section-heading h2,
   .tenant-featured-section>h2 {
-    font-size: 23px;
+    font-size: 28px;
   }
 
   .tenant-section-link {
@@ -1224,28 +1304,21 @@
   }
 
   .tenant-listing-grid {
-    grid-template-columns: 1fr;
-    gap: 18px;
+    gap: 50px;
   }
 
-  .tenant-listing-photo,
-  .tenant-skeleton-photo {
-    height: min(64vw, 260px);
+  .tenant-featured-empty {
+    min-height: 132px;
+    border-radius: 16px;
   }
 
-  .tenant-card-body {
-    min-height: 158px;
-  }
-
-  .tenant-featured-empty,
-  .tenant-featured-skeleton,
-  .tenant-featured-property {
-    min-height: 280px;
-    border-radius: 18px;
+  .tenant-featured-skeleton {
+    aspect-ratio: 903 / 579;
+    border-radius: 16px;
   }
 
   .tenant-featured-property {
-    height: 360px;
+    border-radius: 30px;
   }
 
   .tenant-featured-details {
@@ -1260,7 +1333,7 @@
   }
 
   .tenant-button {
-    padding: 14px 40px;
+    padding: 10px 16px;
   }
 
   .tenant-load-error {

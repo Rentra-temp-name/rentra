@@ -114,3 +114,46 @@ Append new entries at the bottom only; never edit or delete older entries. The b
 - Open items: GiST proof, load test with many users, real-Supabase p95, worst-case 1.7 s re-measure, DBSCAN input cap unmeasured, pooler test skipped (needs `TEST_POOLER_DATABASE_URL`), Docker image build not verified, Sentry untested with a real DSN, cron schedule unverified locally, restrict or regenerate the leaked `google_maps_key` before launch.
 - Unexplained: why `test_connect_creates_both_notifications_atomically` was green on the earlier clean run before the sequence grant fix.
 - `profiles.active_role` is a nullable UI-mode field exposed through `GET/PUT /me`; it does not affect authorization or matching.
+
+## 2026-11-18: tenant home and sidebar UI documentation
+- Updated `docs/product/user-flows.md` to describe the persistent signed-in sidebar and current tenant home sections: For You, Featured, New Listings, and Your Saved Listings. Browse all links sit below their cards.
+- Updated `docs/design-system/README.md` with the current CSS color tokens and the implemented home typography and spacing values. Unspecified system-wide values remain TBD.
+- Current home spacing: 10px greeting/subtitle, 100px welcome/sections, 30px within sections, 150px between sections, and 50px between listing cards. The desktop Featured card is 903×579px with details inset 65px from left and bottom.
+- Collapsed sidebar documentation now records the 72px rail and visual icon alignment with the `r` mark; active navigation uses the filled icon treatment.
+
+## 2026-11-18: shared MainCard and 4:3 listing photos
+- Extracted the existing tenant listing-card UI into the reusable `MainCard` component, retaining its CSS classes, typography, shadow, padding, and spacing.
+- Updated listing-card and loading-skeleton photo areas to 4:3. At the 372px card width, the photo area is 279px tall. The bookmark is anchored to the card body so it stays aligned when the image height changes.
+- Updated the design system, product flows, and architecture overview with the shared card, its data fields, and photo ratio. Featured selection remains a future wiring item because the current database/API does not expose an `is_featured` field.
+
+## 2026-11-18: documented For You matching flow
+- Recorded that `/matches` is the source of For You eligibility, matching, scoring, and ordering; the frontend preserves backend order, deduplicates, caps the home preview at six, and only formats the results in `MainCard`.
+- Documented detail hydration through `GET /listings/{id}` for numeric values and ordered photos, plus the current silent summary fallback if that request fails.
+
+## 2026-11-18: extracted FeaturedCard
+- Extracted the wide Featured listing presentation into `FeaturedCard`; the existing dark overlay and independent 903:579 image ratio are preserved.
+- `FeaturedCard` receives one API-loaded candidate from `FeaturedSection` and renders only the displayed title, location, bedroom/bathroom counts, rent, and image. It makes no separate API request.
+- Documented the component and future wiring in the setup checklist. Featured selection remains open because there is no `is_featured` database field or endpoint yet.
+
+## 2026-11-18: listing detail handoff implementation
+- Added the responsive `/rent/[listing-slug]` detail screen inside the existing persistent `AppShell`; listing cards already link to the route using a slug ending in the listing UUID.
+- The screen requests the public listing detail endpoint and renders its title, rent, ordered photos, numeric facts, creation age, coordinates, and phone/WhatsApp contact actions. The gallery has a photo viewer and full-screen view; the location section uses the returned point.
+- Extended public detail JSON with ordered, registry-label `answers` grouped by attribute key so the detail view can show stored amenities and property requirements. No answer values are synthesized.
+- The handoff's description text, named address, and user-specific “Match” badges are unavailable from the current schema/API. These remain explicit backend/API gaps; see `docs/product/user-flows.md` and `docs/architecture/overview.md`.
+- Updated the design-system notes with listing-detail geometry and the backend handoff contract with detail `numeric`/`answers` fields.
+
+## 2026-11-18: full listing cards navigate to detail
+- Made the entire MainCard surface open the listing detail URL in For You, New Listings, and Your Saved Listings; the bookmark remains a separate save action.
+- FeaturedCard also links its full surface. Preview cards now follow the same route behavior, though their synthetic IDs will show the unavailable state until replaced with real API listings.
+
+## 2026-11-18: home preview cards show preview detail
+- Added a local detail fallback for synthetic For You, New Listings, Saved, and Featured preview IDs. These test cards open the detail layout without requesting a nonexistent backend row; real UUID listing IDs continue to use `GET /listings/{id}`.
+
+## 2026-11-18: replaced detail approximation with Figma handoff
+- Removed the separately styled approximation and ported the supplied `src/App.tsx` layout and its image/icon assets into the Rentra detail route. The handoff's own sidebar is excluded so the route keeps Rentra's persistent `AppShell` sidebar.
+- Bound title, rent, bedrooms, bathrooms, size, photo, creation age, landlord display name, and phone/WhatsApp actions to listing detail data while preserving the handoff's 1230px frame, exact typography, gallery, section order, amenity/requirement grids, map artwork, and CTA positions.
+- At smaller widths, the handoff's photo and summary columns stack. `npm run build` passed after the port.
+
+## 2026-11-18: clarified listing-detail data mapping
+- Synced the user-flow, architecture, and real-account setup checklist to distinguish fields already bound from the Figma screen's sample content.
+- Listing summary fields and contact actions are API-bound. Amenities/Requirements tile text, map artwork, and nearby examples remain handoff placeholders; selected answers are available in `GET /listings/{id}` but are not yet rendered from that response. Description, named locality, and user-specific match badges still require backend support.
